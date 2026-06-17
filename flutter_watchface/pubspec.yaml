@@ -1,0 +1,34 @@
+name: flutter_watchface
+description: "Standalone Flutter framework for building Pebble watchfaces"
+version: 0.0.1
+repository: https://github.com/coredevices/pebbleos
+issue_tracker: https://github.com/coredevices/pebbleos/issues
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  intl: ^0.20.2 # For date/time formatting
+  ffi: ^2.1.4 # For native C interop
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  ffigen: ^20.1.1
+
+# FFI bindings generator configuration.
+# Regenerate ffi_bindings.g.dart with: dart run ffigen
+ffigen:
+  name: WatchfaceNativeBindings
+  description: "Auto-generated bindings for Pebble watchface C API"
+  output: "lib/src/platform/ffi_bindings.g.dart"
+  headers:
+    entry-points:
+      - "../src/fw/flutter_bridge/watchface_api.h"
+  comments:
+    style: any
+    length: full
