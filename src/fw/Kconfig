@@ -50,6 +50,15 @@ config MODDABLE_XS
       Build Moddable XS support for running JavaScript apps. PRF
       variant builds force this off regardless of the board default.
 
+config DART_RUNTIME
+    bool "Dart/Wasm runtime (WAMR)"
+    default n
+    help
+      Build the on-device Dart runtime: WAMR (WebAssembly Micro Runtime)
+      executing dart2wasm --standalone WasmGC output, so watchfaces and
+      apps authored in Dart/Flutter run natively on the watch (no phone,
+      no JS). The wasm heap lives in PSRAM. Zero impact when disabled.
+
 config MMAP_RESOURCES
     bool "Memory-mapped (zero-copy) resource reads"
     help

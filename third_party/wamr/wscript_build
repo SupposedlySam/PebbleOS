@@ -1,0 +1,111 @@
+# WAMR (WebAssembly Micro Runtime) — the on-device Dart/Wasm engine.
+#
+# Built only when CONFIG_DART_RUNTIME is set (default n). Sources are our fork
+# (third_party/wamr/wasm-micro-runtime @ pebble-dart-wasmgc, which carries the
+# WasmGC fixes needed to run dart2wasm --standalone output) plus the PebbleOS
+# platform layer in platform/pebble. Config matches the proven host build:
+# classic interpreter + GC + exception-handling + tail-call + bulk-memory +
+# libc-builtin; AOT, JIT, SIMD, WASI and shared memory off.
+
+if bld.env.CONFIG_DART_RUNTIME:
+    core = 'wasm-micro-runtime/core'
+
+    wamr_sources = [
+        core + '/iwasm/common/gc/gc_common.c',
+        core + '/iwasm/common/gc/gc_object.c',
+        core + '/iwasm/common/gc/gc_type.c',
+        core + '/iwasm/common/wasm_application.c',
+        core + '/iwasm/common/wasm_blocking_op.c',
+        core + '/iwasm/common/wasm_exec_env.c',
+        core + '/iwasm/common/wasm_loader_common.c',
+        core + '/iwasm/common/wasm_memory.c',
+        core + '/iwasm/common/wasm_native.c',
+        core + '/iwasm/common/wasm_runtime_common.c',
+        core + '/iwasm/common/arch/invokeNative_thumb_vfp.s',
+        core + '/iwasm/interpreter/wasm_interp_classic.c',
+        core + '/iwasm/interpreter/wasm_loader.c',
+        core + '/iwasm/interpreter/wasm_runtime.c',
+        core + '/iwasm/libraries/libc-builtin/libc_builtin_wrapper.c',
+        core + '/shared/mem-alloc/ems/ems_alloc.c',
+        core + '/shared/mem-alloc/ems/ems_gc.c',
+        core + '/shared/mem-alloc/ems/ems_hmu.c',
+        core + '/shared/mem-alloc/ems/ems_kfc.c',
+        core + '/shared/mem-alloc/mem_alloc.c',
+        core + '/shared/utils/bh_assert.c',
+        core + '/shared/utils/bh_bitmap.c',
+        core + '/shared/utils/bh_common.c',
+        core + '/shared/utils/bh_hashmap.c',
+        core + '/shared/utils/bh_leb128.c',
+        core + '/shared/utils/bh_list.c',
+        core + '/shared/utils/bh_log.c',
+        core + '/shared/utils/bh_queue.c',
+        core + '/shared/utils/bh_vector.c',
+        'platform/pebble/platform_pebble.c',
+    ]
+
+    wamr_defines = [
+        'WASM_ENABLE_INTERP=1',
+        'WASM_ENABLE_FAST_INTERP=0',
+        'WASM_ENABLE_GC=1',
+        'WASM_ENABLE_EXCE_HANDLING=1',
+        'WASM_ENABLE_TAGS=1',
+        'WASM_ENABLE_TAIL_CALL=1',
+        'WASM_ENABLE_BULK_MEMORY=1',
+        'WASM_ENABLE_REF_TYPES=1',
+        'WASM_ENABLE_AOT=0',
+        'WASM_ENABLE_JIT=0',
+        'WASM_ENABLE_LIBC_BUILTIN=1',
+        'WASM_ENABLE_LIBC_WASI=0',
+        'WASM_ENABLE_SHARED_MEMORY=0',
+        'WASM_ENABLE_MULTI_MODULE=0',
+        'WASM_ENABLE_MINI_LOADER=0',
+        'WASM_ENABLE_SHRUNK_MEMORY=1',
+        'WASM_DISABLE_HW_BOUND_CHECK=1',
+        'WASM_DISABLE_STACK_HW_BOUND_CHECK=1',
+        'BUILD_TARGET_THUMB',
+        # WAMR requires these to be its own allocator wrappers.
+        'BH_MALLOC=wasm_runtime_malloc',
+        'BH_FREE=wasm_runtime_free',
+    ]
+
+    wamr_includes = [
+        core + '/iwasm/include',
+        core + '/iwasm/common',
+        core + '/iwasm/common/gc',
+        core + '/iwasm/interpreter',
+        core + '/iwasm/libraries/libc-builtin',
+        core + '/shared/mem-alloc',
+        core + '/shared/utils',
+        core + '/shared/utils/uncommon',
+        core + '/shared/platform/include',
+        'platform/pebble',
+    ]
+
+    # The firmware builds -ffreestanding; force-include a compat header so
+    # WAMR's libc use (qsort/bsearch/strncasecmp/...) sees declarations. The
+    # symbols themselves are provided by newlib.
+    compat = bld.path.find_node('platform/pebble/wamr_compat.h').abspath()
+
+    wamr_cflags = [
+        '-include', compat,
+        '-Wno-unused-parameter',
+        '-Wno-unused-variable',
+        '-Wno-unused-function',
+        '-Wno-sign-compare',
+        '-Wno-strict-aliasing',
+        '-Wno-error=cast-align',
+        '-Wno-error=maybe-uninitialized',
+        '-Wno-error=format',
+        '-Wno-format',
+        '-fno-strict-aliasing',
+    ]
+
+    bld(export_includes=[core + '/iwasm/include'], name='wamr_includes')
+
+    bld.stlib(source=wamr_sources,
+              target='wamr',
+              defines=wamr_defines,
+              cflags=wamr_cflags,
+              includes=wamr_includes,
+              export_includes=[core + '/iwasm/include'],
+              use=['fw_includes', 'libos_includes'])
