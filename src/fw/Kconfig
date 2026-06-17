@@ -56,6 +56,14 @@ config MMAP_RESOURCES
       Serve read-only system resources as direct pointers into
       memory-mapped flash instead of copying them out.
 
+config FLUTTER_WATCHFACE
+    bool "Flutter watchface bridge"
+    default n
+    help
+      Build the C bridge that exposes the watchface host API to
+      Flutter/Dart watchfaces over FFI (see src/fw/flutter_bridge and
+      the flutter_watchface package). Experimental and off by default.
+
 endmenu
 
 choice

@@ -35,6 +35,11 @@ Keep in mind that some targets may not currently compile as-is.
   PRF (recovery) builds always disable the engine regardless of this
   value.
 
+:`-DCONFIG_FLUTTER_WATCHFACE=y`:
+  Build the C bridge (`src/fw/flutter_bridge`) that exposes the
+  watchface host API to Flutter/Dart watchfaces over FFI, used by the
+  `flutter_watchface` package. Experimental and off by default.
+
 ## Manufacturing
 
 :`-DCONFIG_MFG=y`:
