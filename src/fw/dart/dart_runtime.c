@@ -25,10 +25,12 @@
    (Alloc_With_Pool over the ~8 MB PSRAM on obelix). Validated on QEMU: the
    runtime initializes and dispatches; allocation is the gate. */
 #ifndef DART_GC_HEAP_SIZE
-/* Allocated per-instance at instantiate even for non-GC modules. Kept small so
-   the no-GC smoke test fits the SRAM kernel heap; the full Dart module needs a
-   much larger GC heap from a PSRAM pool. */
-#define DART_GC_HEAP_SIZE (32 * 1024)
+/* Allocated per-instance at instantiate even for non-GC modules. On real obelix
+   the SRAM kernel heap is tighter than the emulator, and 32 KB here made
+   instantiate fail on hardware (it succeeded in QEMU). The no-GC smoke test
+   needs essentially no GC heap, so keep this small; the full Dart module will
+   need a much larger GC heap from a PSRAM pool. */
+#define DART_GC_HEAP_SIZE (8 * 1024)
 #endif
 #define DART_APP_STACK_SIZE (12 * 1024)
 #define DART_APP_HEAP_SIZE (12 * 1024)
@@ -296,6 +298,9 @@ static wasm_module_t s_step_module;
 static wasm_module_inst_t s_step_inst;
 static wasm_exec_env_t s_step_exec_env;
 static wasm_function_inst_t s_step_add_func;
+static char s_step_error[160];
+
+const char *dart_smoketest_last_error(void) { return s_step_error; }
 
 static void prv_step_cleanup(void) {
   if (s_step_exec_env) { wasm_runtime_destroy_exec_env(s_step_exec_env); s_step_exec_env = NULL; }
@@ -307,30 +312,56 @@ static void prv_step_cleanup(void) {
 
 int dart_smoketest_run_step(int step, int *result_out) {
   char err[128];
+  s_step_error[0] = '\0';
   switch (step) {
     case 1:
-      if (!dart_runtime_init()) { return -1; }
+      if (!dart_runtime_init()) {
+        snprintf(s_step_error, sizeof(s_step_error), "runtime init failed");
+        return -1;
+      }
       return 1;
     case 2:
       s_step_buf = (uint8_t *)wasm_runtime_malloc(g_wasm_add_module_size);
-      if (!s_step_buf) { return -1; }
+      if (!s_step_buf) {
+        snprintf(s_step_error, sizeof(s_step_error), "malloc %u failed",
+                 (unsigned)g_wasm_add_module_size);
+        return -1;
+      }
       memcpy(s_step_buf, g_wasm_add_module, g_wasm_add_module_size);
       s_step_module = wasm_runtime_load(s_step_buf, g_wasm_add_module_size, err, sizeof(err));
-      if (!s_step_module) { prv_step_cleanup(); return -1; }
+      if (!s_step_module) {
+        snprintf(s_step_error, sizeof(s_step_error), "%s", err);
+        prv_step_cleanup();
+        return -1;
+      }
       return 1;
     case 3:
       s_step_inst = wasm_runtime_instantiate(s_step_module, 8 * 1024, 8 * 1024, err, sizeof(err));
-      if (!s_step_inst) { prv_step_cleanup(); return -1; }
+      if (!s_step_inst) {
+        snprintf(s_step_error, sizeof(s_step_error), "%s", err);
+        prv_step_cleanup();
+        return -1;
+      }
       return 1;
     case 4:
       s_step_exec_env = wasm_runtime_create_exec_env(s_step_inst, 8 * 1024);
       s_step_add_func = wasm_runtime_lookup_function(s_step_inst, "add");
-      if (!s_step_exec_env || !s_step_add_func) { prv_step_cleanup(); return -1; }
+      if (!s_step_exec_env || !s_step_add_func) {
+        snprintf(s_step_error, sizeof(s_step_error), "%s",
+                 s_step_exec_env ? "no 'add' export" : "exec_env alloc failed");
+        prv_step_cleanup();
+        return -1;
+      }
       return 1;
     case 5: {
       uint32_t argv[2] = {40, 2};
       bool ok = wasm_runtime_call_wasm(s_step_exec_env, s_step_add_func, 2, argv);
-      if (!ok) { prv_step_cleanup(); return -1; }
+      if (!ok) {
+        snprintf(s_step_error, sizeof(s_step_error), "trap: %s",
+                 wasm_runtime_get_exception(s_step_inst));
+        prv_step_cleanup();
+        return -1;
+      }
       if (result_out) { *result_out = (int)argv[0]; }
       prv_step_cleanup();
       return 0;  // done

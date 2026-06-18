@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define STATUS_LEN 96
+#define STATUS_LEN 200
 #define NUM_STEPS 5
 
 static const char *const s_step_labels[] = {
@@ -67,9 +67,11 @@ static void prv_execute(void *ctx) {
   int result = 0;
   int r = dart_smoketest_run_step(data->step, &result);
   if (r < 0) {
-    snprintf(line, sizeof(line), "FAILED at:\n%s", s_step_labels[data->step]);
+    const char *e = dart_smoketest_last_error();
+    snprintf(line, sizeof(line), "FAIL %s\n%s", s_step_labels[data->step], e);
     prv_set_status(data, line);
-    APP_LOG(APP_LOG_LEVEL_ERROR, "dart diag: FAILED at %s", s_step_labels[data->step]);
+    APP_LOG(APP_LOG_LEVEL_ERROR, "dart diag: FAILED at %s: %s",
+            s_step_labels[data->step], e);
     return;
   }
   if (r == 0) {
@@ -93,7 +95,7 @@ static void prv_init(void) {
 
   data->text_layer = text_layer_create((GRect) {
       .origin = { 0, 30 }, .size = { bounds.size.w, bounds.size.h - 30 } });
-  text_layer_set_font(data->text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_font(data->text_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_alignment(data->text_layer, GTextAlignmentCenter);
   layer_add_child(window_layer, text_layer_get_layer(data->text_layer));
 

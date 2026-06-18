@@ -34,3 +34,7 @@ void dart_runtime_schedule_smoketest(void);
 //! before executing it. Returns 1 if more steps remain, 0 when finished (and
 //! sets *result_out, expected 42), -1 on failure. Single-user; diagnostic only.
 int dart_smoketest_run_step(int step, int *result_out);
+
+//! After dart_smoketest_run_step() returns -1, the WAMR error string for the
+//! failing stage (e.g. "allocate memory failed"). Empty if no error.
+const char *dart_smoketest_last_error(void);
