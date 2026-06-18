@@ -29,3 +29,8 @@ bool dart_run_wasm_smoketest(void);
 //! Queue the wasm smoke test onto the KernelBG system task (runs off the boot
 //! path; safe to call from boot without blocking it). Result is logged.
 void dart_runtime_schedule_smoketest(void);
+
+//! Run one stage of the smoke test (step = 1..5) so a UI can show "step N"
+//! before executing it. Returns 1 if more steps remain, 0 when finished (and
+//! sets *result_out, expected 42), -1 on failure. Single-user; diagnostic only.
+int dart_smoketest_run_step(int step, int *result_out);

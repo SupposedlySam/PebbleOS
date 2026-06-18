@@ -738,6 +738,12 @@
       "id": -100,
       "enum": "NOTIFICATIONS_CLEAR_HISTORY",
       "md_fn": "notifications_clear_history_app_get_info"
+    },
+    {
+      "id": -200,
+      "enum": "DART_DIAG",
+      "md_fn": "dart_diag_get_app_info",
+      "ifdefs": ["CONFIG_DART_RUNTIME"]
     }
   ],
   "resource_apps": [

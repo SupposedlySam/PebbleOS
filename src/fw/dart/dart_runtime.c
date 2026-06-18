@@ -287,6 +287,59 @@ void command_dart_wasm(void) {
   PBL_LOG_ALWAYS("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
 }
 
+/* Stepped smoke test for the on-screen diagnostic app. Each WAMR stage runs in
+ * a separate call so the app can render "step N" to the screen BEFORE executing
+ * it: if a stage faults on hardware, the screen freezes on the dead stage. Holds
+ * state in file statics (single-user, diagnostic only). */
+static uint8_t *s_step_buf;
+static wasm_module_t s_step_module;
+static wasm_module_inst_t s_step_inst;
+static wasm_exec_env_t s_step_exec_env;
+static wasm_function_inst_t s_step_add_func;
+
+static void prv_step_cleanup(void) {
+  if (s_step_exec_env) { wasm_runtime_destroy_exec_env(s_step_exec_env); s_step_exec_env = NULL; }
+  if (s_step_inst) { wasm_runtime_deinstantiate(s_step_inst); s_step_inst = NULL; }
+  if (s_step_module) { wasm_runtime_unload(s_step_module); s_step_module = NULL; }
+  if (s_step_buf) { wasm_runtime_free(s_step_buf); s_step_buf = NULL; }
+  s_step_add_func = NULL;
+}
+
+int dart_smoketest_run_step(int step, int *result_out) {
+  char err[128];
+  switch (step) {
+    case 1:
+      if (!dart_runtime_init()) { return -1; }
+      return 1;
+    case 2:
+      s_step_buf = (uint8_t *)wasm_runtime_malloc(g_wasm_add_module_size);
+      if (!s_step_buf) { return -1; }
+      memcpy(s_step_buf, g_wasm_add_module, g_wasm_add_module_size);
+      s_step_module = wasm_runtime_load(s_step_buf, g_wasm_add_module_size, err, sizeof(err));
+      if (!s_step_module) { prv_step_cleanup(); return -1; }
+      return 1;
+    case 3:
+      s_step_inst = wasm_runtime_instantiate(s_step_module, 8 * 1024, 8 * 1024, err, sizeof(err));
+      if (!s_step_inst) { prv_step_cleanup(); return -1; }
+      return 1;
+    case 4:
+      s_step_exec_env = wasm_runtime_create_exec_env(s_step_inst, 8 * 1024);
+      s_step_add_func = wasm_runtime_lookup_function(s_step_inst, "add");
+      if (!s_step_exec_env || !s_step_add_func) { prv_step_cleanup(); return -1; }
+      return 1;
+    case 5: {
+      uint32_t argv[2] = {40, 2};
+      bool ok = wasm_runtime_call_wasm(s_step_exec_env, s_step_add_func, 2, argv);
+      if (!ok) { prv_step_cleanup(); return -1; }
+      if (result_out) { *result_out = (int)argv[0]; }
+      prv_step_cleanup();
+      return 0;  // done
+    }
+    default:
+      return -1;
+  }
+}
+
 static void prv_dart_smoketest_cb(void *data) {
   (void)data;
   dart_run_wasm_smoketest();
