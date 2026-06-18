@@ -1,24 +1,37 @@
 /* SPDX-FileCopyrightText: 2026 Jonah Walker */
 /* SPDX-License-Identifier: Apache-2.0 */
 
-//! Remote console endpoint (0xCAFE). Runs a PebbleOS console-command string sent
+//! Remote console endpoint (0x4000). Runs a PebbleOS console-command string sent
 //! over the Pebble protocol (BLE / CloudPebble relay) through the normal prompt
-//! dispatcher, and returns the command's captured output on the same endpoint.
+//! dispatcher, and returns the command's captured output.
 //!
-//! This is the "flash once, drive forever" affordance: a host can run any
-//! console command (dart wasm, app launch, future psram/heap/peek...) and read
-//! the result without USB, without a screen, and without reflashing. The work
-//! runs on KernelBG (never the boot path), so it can't brick boot.
+//! The "flash once, drive forever" affordance: a host runs any console command
+//! (dart wasm, app launch, future psram/heap/peek...) and reads the result with
+//! no USB, no screen, and no reflash. Work runs on KernelBG (never the boot
+//! path), so it can't brick boot.
+//!
+//! Output is delivered two ways:
+//!  - On endpoint 0x4000 (works for a direct connection / QEMU).
+//!  - As app-log messages on endpoint 2006. The CloudPebble relay (the phone
+//!    app's libpebble3) DROPS inbound watch messages whose endpoint it doesn't
+//!    know, so our custom 0x4000 reply never reaches a relay-connected tool.
+//!    2006 (app logs) IS a known endpoint, so it relays — read it with the
+//!    AppLog endpoint / `pebble logs`.
 
+#include "applib/app_logging.h"
 #include "console/prompt.h"
 #include "pbl/services/comm_session/session.h"
 #include "pbl/services/system_task.h"
 #include "system/logging.h"
 
+#include <stdarg.h>
+#include <stddef.h>
 #include <string.h>
 
 #define DEV_CONSOLE_ENDPOINT 0x4000
+#define APP_LOG_ENDPOINT 2006
 #define DEV_CONSOLE_RESP_MAX 1024
+#define APPLOG_CHUNK 80  // fits LOG_BUFFER_LENGTH (128) after uuid + log header
 
 static CommSession *s_session;
 static char s_cmd[PROMPT_BUFFER_SIZE_BYTES];
@@ -37,7 +50,33 @@ static void prv_response_cb(const char *response) {
   }
 }
 
-//! Fires when the command completes (sync or async) — send the captured output.
+static int prv_binfmt(char *buf, int len, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int n = pbl_log_binary_format(buf, len, LOG_LEVEL_INFO, "devcon", 0, fmt, args);
+  va_end(args);
+  return n;
+}
+
+//! Ship one string as an app-log message on endpoint 2006 (a known endpoint the
+//! relay forwards). Sent directly (bypasses the app-logging-mode gate).
+static void prv_ship_applog(const char *str) {
+  CommSession *session = comm_session_get_system_session();
+  if (!session) {
+    return;
+  }
+  char log_buffer[LOG_BUFFER_LENGTH];
+  AppLogBinaryMessage *msg = (AppLogBinaryMessage *)log_buffer;
+  memset(&msg->uuid, 0, sizeof(msg->uuid));
+  const size_t off = offsetof(AppLogBinaryMessage, log_msg);
+  int n = prv_binfmt((char *)&msg->log_msg, (int)(LOG_BUFFER_LENGTH - off), "%s", str);
+  if (n > 0) {
+    comm_session_send_data(session, APP_LOG_ENDPOINT, (uint8_t *)log_buffer,
+                           off + (size_t)n, COMM_SESSION_DEFAULT_TIMEOUT);
+  }
+}
+
+//! Fires when the command completes (sync or async) — deliver the output.
 static void prv_complete_cb(void) {
   if (!s_session) {
     return;
@@ -47,8 +86,17 @@ static void prv_complete_cb(void) {
     memcpy(s_resp, kOk, sizeof(kOk) - 1);
     s_resp_len = sizeof(kOk) - 1;
   }
+  // 0x4000 reply (direct/QEMU).
   comm_session_send_data(s_session, DEV_CONSOLE_ENDPOINT, (uint8_t *)s_resp,
                          s_resp_len, COMM_SESSION_DEFAULT_TIMEOUT);
+  // App-log copy (relay-reachable), chunked to fit a single app-log message.
+  for (size_t i = 0; i < s_resp_len; i += APPLOG_CHUNK) {
+    char tmp[APPLOG_CHUNK + 1];
+    size_t n = (s_resp_len - i < APPLOG_CHUNK) ? (s_resp_len - i) : APPLOG_CHUNK;
+    memcpy(tmp, s_resp + i, n);
+    tmp[n] = '\0';
+    prv_ship_applog(tmp);
+  }
   s_session = NULL;
 }
 
