@@ -16,6 +16,7 @@
 
 #include <inttypes.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ---- host string object (UTF-16), wrapped as externref ---- */

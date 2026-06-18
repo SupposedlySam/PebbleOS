@@ -4,15 +4,16 @@
    are simple, correct-enough implementations; the float-parsing ones are not
    on any path the on-device modules currently exercise. */
 
-#include <ctype.h>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
 
+static int dart_tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
 int strncasecmp(const char *a, const char *b, size_t n) {
   for (size_t i = 0; i < n; i++) {
-    int ca = tolower((unsigned char)a[i]);
-    int cb = tolower((unsigned char)b[i]);
+    int ca = dart_tolower((unsigned char)a[i]);
+    int cb = dart_tolower((unsigned char)b[i]);
     if (ca != cb) {
       return ca - cb;
     }
@@ -136,6 +137,26 @@ double rint(double x) {
   return (fmod(f, 2.0) == 0.0) ? f : f + 1.0;
 }
 float rintf(float x) { return (float)rint((double)x); }
+
+/* WAMR's libc-builtin ctype wrappers need these; pblibc provides only a subset
+   on some boards. Defined weak so a board's own (strong) versions win when
+   present, and these fill the gap otherwise. ASCII semantics. */
+#define DART_WEAK __attribute__((weak))
+DART_WEAK int isalpha(int c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+DART_WEAK int isdigit(int c) { return c >= '0' && c <= '9'; }
+DART_WEAK int isalnum(int c) { return isalpha(c) || isdigit(c); }
+DART_WEAK int isupper(int c) { return c >= 'A' && c <= 'Z'; }
+DART_WEAK int islower(int c) { return c >= 'a' && c <= 'z'; }
+DART_WEAK int isspace(int c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+DART_WEAK int iscntrl(int c) { return (c >= 0 && c < 0x20) || c == 0x7f; }
+DART_WEAK int isprint(int c) { return c >= 0x20 && c < 0x7f; }
+DART_WEAK int isgraph(int c) { return c > 0x20 && c < 0x7f; }
+DART_WEAK int ispunct(int c) { return isgraph(c) && !isalnum(c); }
+DART_WEAK int isxdigit(int c) {
+  return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
 
 /* WAMR's C-API trap path (wasm_runtime_invoke_c_api_native) is compiled but
    never reached - our natives use the simple NativeSymbol ABI, not wasm_func_t.

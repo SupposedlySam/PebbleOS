@@ -15,9 +15,16 @@
 #include <inttypes.h>
 #include <string.h>
 
-#define DART_APP_STACK_SIZE (64 * 1024)
-#define DART_APP_HEAP_SIZE (512 * 1024)
-#define DART_EXEC_STACK_SIZE (64 * 1024)
+/* The WasmGC objects live in the GC heap (init_args.gc_heap_size); the
+   instantiate heap is the wasm linear memory + module malloc. These, plus the
+   writable module copy, currently draw from the kernel heap (SRAM) and so do
+   NOT fit SRAM-only boards (Emery/QEMU): a real module needs the PSRAM pool
+   (Alloc_With_Pool over the ~8 MB PSRAM on obelix). Validated on QEMU: the
+   runtime initializes and dispatches; allocation is the gate. */
+#define DART_GC_HEAP_SIZE (512 * 1024)
+#define DART_APP_STACK_SIZE (32 * 1024)
+#define DART_APP_HEAP_SIZE (64 * 1024)
+#define DART_EXEC_STACK_SIZE (32 * 1024)
 
 static bool s_initialized = false;
 
@@ -32,6 +39,7 @@ bool dart_runtime_init(void) {
   /* WAMR calls our os_malloc/os_free (libos -> kernel heap). Moving to a fixed
      PSRAM pool (Alloc_With_Pool) is a follow-up once PSRAM is brought up. */
   init_args.mem_alloc_type = Alloc_With_System_Allocator;
+  init_args.gc_heap_size = DART_GC_HEAP_SIZE;
   init_args.native_module_name = "dart";
   init_args.native_symbols =
       dart_embedder_get_natives(&init_args.n_native_symbols);
@@ -107,8 +115,10 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
     return false;
   }
 
-  /* The module typically lives in flash (const); WAMR needs a mutable working
-     copy that stays valid until unload. */
+  /* WAMR's loader writes the input buffer in place, so a flash-resident
+     (const) module must be copied to RAM; the copy stays valid until unload.
+     On SRAM-only boards this competes with the GC heap; a PSRAM pool removes
+     the constraint. */
   module_buf = (uint8_t *)kernel_malloc(wasm_size);
   if (!module_buf) {
     PBL_LOG_ERR("dart: no RAM for module copy (%" PRIu32 " bytes)", wasm_size);

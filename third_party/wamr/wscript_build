@@ -21,11 +21,9 @@ if bld.env.CONFIG_DART_RUNTIME:
         core + '/iwasm/common/wasm_memory.c',
         core + '/iwasm/common/wasm_native.c',
         core + '/iwasm/common/wasm_runtime_common.c',
-        core + '/iwasm/common/arch/invokeNative_thumb_vfp.s',
         core + '/iwasm/interpreter/wasm_interp_classic.c',
         core + '/iwasm/interpreter/wasm_loader.c',
         core + '/iwasm/interpreter/wasm_runtime.c',
-        core + '/iwasm/libraries/libc-builtin/libc_builtin_wrapper.c',
         core + '/shared/mem-alloc/ems/ems_alloc.c',
         core + '/shared/mem-alloc/ems/ems_gc.c',
         core + '/shared/mem-alloc/ems/ems_hmu.c',
@@ -44,6 +42,13 @@ if bld.env.CONFIG_DART_RUNTIME:
         'platform/pebble/dart_libc_shim.c',
     ]
 
+    # The native-call trampoline must match the float ABI: QEMU builds have no
+    # FPU (soft-float), real boards (obelix Cortex-M33) use hard-float VFP.
+    if bld.env.CONFIG_QEMU:
+        wamr_sources.append(core + '/iwasm/common/arch/invokeNative_thumb.s')
+    else:
+        wamr_sources.append(core + '/iwasm/common/arch/invokeNative_thumb_vfp.s')
+
     wamr_defines = [
         'WASM_ENABLE_INTERP=1',
         'WASM_ENABLE_FAST_INTERP=0',
@@ -55,7 +60,7 @@ if bld.env.CONFIG_DART_RUNTIME:
         'WASM_ENABLE_REF_TYPES=1',
         'WASM_ENABLE_AOT=0',
         'WASM_ENABLE_JIT=0',
-        'WASM_ENABLE_LIBC_BUILTIN=1',
+        'WASM_ENABLE_LIBC_BUILTIN=0',
         'WASM_ENABLE_LIBC_WASI=0',
         'WASM_ENABLE_SHARED_MEMORY=0',
         'WASM_ENABLE_MULTI_MODULE=0',
