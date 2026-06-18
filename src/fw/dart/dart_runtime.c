@@ -252,7 +252,7 @@ bool dart_run_wasm_smoketest(void) {
     goto done;
   }
 
-  PBL_LOG_INFO("dart: wasm smoketest add(40,2)=%u %s", (unsigned)argv[0],
+  PBL_LOG_ALWAYS("dart: wasm smoketest add(40,2)=%u %s", (unsigned)argv[0],
                argv[0] == 42 ? "OK" : "WRONG");
   ok = (argv[0] == 42);
 
@@ -275,5 +275,5 @@ done:
 //! Console command: `dart wasm` runs the tiny WAMR smoke test.
 void command_dart_wasm(void) {
   bool ok = dart_run_wasm_smoketest();
-  PBL_LOG_INFO("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
+  PBL_LOG_ALWAYS("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
 }
