@@ -21,12 +21,28 @@
    NOT fit SRAM-only boards (Emery/QEMU): a real module needs the PSRAM pool
    (Alloc_With_Pool over the ~8 MB PSRAM on obelix). Validated on QEMU: the
    runtime initializes and dispatches; allocation is the gate. */
-#define DART_GC_HEAP_SIZE (512 * 1024)
-#define DART_APP_STACK_SIZE (32 * 1024)
-#define DART_APP_HEAP_SIZE (64 * 1024)
-#define DART_EXEC_STACK_SIZE (32 * 1024)
+#ifndef DART_GC_HEAP_SIZE
+#define DART_GC_HEAP_SIZE (96 * 1024)
+#endif
+#define DART_APP_STACK_SIZE (12 * 1024)
+#define DART_APP_HEAP_SIZE (12 * 1024)
+#define DART_EXEC_STACK_SIZE (12 * 1024)
 
 static bool s_initialized = false;
+
+/* WASM memory source. A real dart2wasm module needs far more than the SRAM
+   kernel heap can give (the hello module alone needs >194 KB: ~67 KB writable
+   copy + the GC heap for its constant object graph + instance state). On
+   obelix the production source is a pool over PSRAM @0x60000000 (Alloc_With_Pool)
+   — pending PSRAM bring-up. Until then we use the system allocator (kernel
+   heap) and fail gracefully when a module doesn't fit (proven on QEMU/Emery:
+   init + load succeed; instantiate is gated on RAM). A dedicated pool can be
+   provided by overriding dart_runtime_pool() (weak) to return a PSRAM region. */
+__attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
+  (void)buf;
+  (void)size;
+  return false;
+}
 
 bool dart_runtime_init(void) {
   if (s_initialized) {
@@ -36,9 +52,15 @@ bool dart_runtime_init(void) {
   RuntimeInitArgs init_args;
   memset(&init_args, 0, sizeof(init_args));
 
-  /* WAMR calls our os_malloc/os_free (libos -> kernel heap). Moving to a fixed
-     PSRAM pool (Alloc_With_Pool) is a follow-up once PSRAM is brought up. */
-  init_args.mem_alloc_type = Alloc_With_System_Allocator;
+  void *pool_buf = NULL;
+  uint32_t pool_size = 0;
+  if (dart_runtime_pool(&pool_buf, &pool_size)) {
+    init_args.mem_alloc_type = Alloc_With_Pool;
+    init_args.mem_alloc_option.pool.heap_buf = pool_buf;
+    init_args.mem_alloc_option.pool.heap_size = pool_size;
+  } else {
+    init_args.mem_alloc_type = Alloc_With_System_Allocator;
+  }
   init_args.gc_heap_size = DART_GC_HEAP_SIZE;
   init_args.native_module_name = "dart";
   init_args.native_symbols =
@@ -119,7 +141,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
      (const) module must be copied to RAM; the copy stays valid until unload.
      On SRAM-only boards this competes with the GC heap; a PSRAM pool removes
      the constraint. */
-  module_buf = (uint8_t *)kernel_malloc(wasm_size);
+  module_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
   if (!module_buf) {
     PBL_LOG_ERR("dart: no RAM for module copy (%" PRIu32 " bytes)", wasm_size);
     return false;
@@ -161,7 +183,9 @@ cleanup:
   if (module) {
     wasm_runtime_unload(module);
   }
-  kernel_free(module_buf);
+  if (module_buf) {
+    wasm_runtime_free(module_buf);
+  }
   return ok;
 }
 

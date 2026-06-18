@@ -10,6 +10,48 @@
 
 static int dart_tolower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
+/* pblibc lacks qsort/bsearch. When CONFIG_MODDABLE_XS is enabled the Moddable
+   build vendors its own qsort/bsearch, so only provide ours when XS is off (to
+   avoid duplicate symbols). Small-N usage in WAMR (export tables), so a simple
+   insertion sort is fine. */
+#ifndef CONFIG_MODDABLE_XS
+void qsort(void *base, size_t nmemb, size_t size,
+           int (*compar)(const void *, const void *)) {
+  char *a = (char *)base;
+  for (size_t i = 1; i < nmemb; i++) {
+    for (size_t j = i; j > 0; j--) {
+      char *x = a + (j - 1) * size, *y = a + j * size;
+      if (compar(x, y) <= 0) {
+        break;
+      }
+      for (size_t k = 0; k < size; k++) {
+        char t = x[k];
+        x[k] = y[k];
+        y[k] = t;
+      }
+    }
+  }
+}
+
+void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
+              int (*compar)(const void *, const void *)) {
+  size_t lo = 0, hi = nmemb;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    const char *p = (const char *)base + mid * size;
+    int c = compar(key, p);
+    if (c == 0) {
+      return (void *)p;
+    } else if (c < 0) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return NULL;
+}
+#endif /* !CONFIG_MODDABLE_XS */
+
 int strncasecmp(const char *a, const char *b, size_t n) {
   for (size_t i = 0; i < n; i++) {
     int ca = dart_tolower((unsigned char)a[i]);
