@@ -217,10 +217,14 @@ bool dart_run_wasm_smoketest(void) {
   wasm_exec_env_t exec_env = NULL;
   bool ok = false;
 
+  // Step markers (PBL_LOG_ALWAYS so they hit the flash log): if the test faults
+  // on hardware, the last marker in `pebble fw flash-logs` names the dead stage.
+  PBL_LOG_ALWAYS("dart: smoketest [1] init");
   if (!dart_runtime_init()) {
     return false;
   }
 
+  PBL_LOG_ALWAYS("dart: smoketest [2] malloc %u", (unsigned)g_wasm_add_module_size);
   buf = (uint8_t *)wasm_runtime_malloc(g_wasm_add_module_size);
   if (!buf) {
     PBL_LOG_ERR("dart: smoketest no RAM");
@@ -228,18 +232,21 @@ bool dart_run_wasm_smoketest(void) {
   }
   memcpy(buf, g_wasm_add_module, g_wasm_add_module_size);
 
+  PBL_LOG_ALWAYS("dart: smoketest [3] load");
   module = wasm_runtime_load(buf, g_wasm_add_module_size, error_buf,
                              sizeof(error_buf));
   if (!module) {
     PBL_LOG_ERR("dart: smoketest load failed: %s", error_buf);
     goto done;
   }
+  PBL_LOG_ALWAYS("dart: smoketest [4] instantiate");
   inst = wasm_runtime_instantiate(module, 8 * 1024, 8 * 1024, error_buf,
                                   sizeof(error_buf));
   if (!inst) {
     PBL_LOG_ERR("dart: smoketest instantiate failed: %s", error_buf);
     goto done;
   }
+  PBL_LOG_ALWAYS("dart: smoketest [5] exec_env");
   exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
   wasm_function_inst_t add_func = wasm_runtime_lookup_function(inst, "add");
   if (!add_func) {
@@ -247,6 +254,7 @@ bool dart_run_wasm_smoketest(void) {
     goto done;
   }
 
+  PBL_LOG_ALWAYS("dart: smoketest [6] call add(40,2)");
   uint32_t argv[2] = {40, 2};
   if (!wasm_runtime_call_wasm(exec_env, add_func, 2, argv)) {
     PBL_LOG_ERR("dart: smoketest trap: %s", wasm_runtime_get_exception(inst));

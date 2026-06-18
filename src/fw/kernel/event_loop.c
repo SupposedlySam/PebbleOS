@@ -585,12 +585,12 @@ static NOINLINE void prv_launcher_main_loop_init(void) {
   serial_console_enable_prompt();
 
 #if defined(CONFIG_DART_RUNTIME)
-  // Run the Dart/wasm smoke test, but NEVER synchronously here: this is
-  // KernelMain before the main loop feeds the watchdog, and a blocking call
-  // bricked a watch (boot loop). dart_runtime_schedule_smoketest() only QUEUES
-  // a callback onto the KernelBG system task and returns immediately, so the
-  // work runs off the boot path. Result is logged (see `pebble fw flash-logs`).
-  dart_runtime_schedule_smoketest();
+  // Do NOT auto-run the Dart smoke test at boot. Even deferred onto KernelBG it
+  // would run on EVERY boot, so if the test itself faults on real hardware the
+  // watch boot-loops (observed: the smoke test hardfaulted on-device, looping).
+  // The test is now trigger-only (`dart wasm` console / future app), so a fault
+  // can never loop boot. The firmware boots to a stable watchface and stays up;
+  // being non-release, its flash log is readable via `pebble fw flash-logs`.
 #endif
 }
 
