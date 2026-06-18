@@ -84,12 +84,6 @@
 #include "util/struct.h"
 #include "system/version.h"
 
-#if defined(CONFIG_DART_RUNTIME)
-#include "dart/dart_runtime.h"
-#include "drivers/vibe.h"
-#include "kernel/util/sleep.h"
-#endif
-
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -586,35 +580,12 @@ static NOINLINE void prv_launcher_main_loop_init(void) {
   notify_system_ready_for_communication();
   serial_console_enable_prompt();
 
-#if defined(CONFIG_DART_RUNTIME)
-  // One-shot at boot, results logged (visible via `pebble logs`):
-  //  1. the no-GC wasm smoke test — proves WAMR executes wasm on this hardware;
-  //  2. the full dart2wasm module — reveals whether obelix's SRAM runs it as-is
-  //     (prints "...sum=45") or how much it's short (graceful failure -> PSRAM).
-  // Both fail gracefully; neither crashes the watch.
-  bool dart_smoke_ok = dart_run_wasm_smoketest();
-  bool dart_full_ok = dart_run_test_module();
-
-  // Physical signal so a sealed watch (no USB/log channel) reports the result:
-  //   2 buzzes  = WAMR executed wasm on this hardware (smoke test passed)
-  //   +1 long buzz = the full Dart module also ran (sum=45)
-  if (dart_smoke_ok) {
-    for (int i = 0; i < 2; ++i) {
-      vibe_set_strength(VIBE_STRENGTH_MAX);
-      vibe_ctl(true);
-      psleep(180);
-      vibe_ctl(false);
-      psleep(150);
-    }
-  }
-  if (dart_full_ok) {
-    psleep(250);
-    vibe_set_strength(VIBE_STRENGTH_MAX);
-    vibe_ctl(true);
-    psleep(600);
-    vibe_ctl(false);
-  }
-#endif
+  // NOTE: Do NOT run the Dart runtime synchronously here. This executes in
+  // KernelMain BEFORE the main loop starts feeding the KernelMain watchdog, so
+  // any work longer than the watchdog timeout (the full-module load + psleep
+  // vibes did this on hardware) causes a reset -> boot loop. The Dart tests are
+  // available via the `dart test` / `dart wasm` console commands; an on-boot
+  // trigger must be a watchdog-fed deferred task, not a blocking call here.
 }
 
 void launcher_main_loop(void) {
