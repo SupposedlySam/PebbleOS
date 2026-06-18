@@ -84,6 +84,10 @@
 #include "util/struct.h"
 #include "system/version.h"
 
+#if defined(CONFIG_DART_RUNTIME)
+#include "dart/dart_runtime.h"
+#endif
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -579,6 +583,13 @@ static NOINLINE void prv_launcher_main_loop_init(void) {
 
   notify_system_ready_for_communication();
   serial_console_enable_prompt();
+
+#if defined(CONFIG_DART_RUNTIME)
+  // One-shot at boot: verify the Dart/Wasm runtime executes on this hardware.
+  // The result is logged (visible via `pebble logs`). The smoke test fits SRAM;
+  // the full Dart module additionally needs the PSRAM pool.
+  dart_run_wasm_smoketest();
+#endif
 }
 
 void launcher_main_loop(void) {
