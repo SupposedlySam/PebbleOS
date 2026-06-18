@@ -135,6 +135,8 @@ static void prv_print(wasm_exec_env_t env, wasm_externref_obj_t line) {
   if (s) {
     char *u = prv_hstr_to_utf8(s);
     dbgserial_putstr(u ? u : "");
+    // Also log so Dart's print() is visible over `pebble logs` on a sealed watch.
+    PBL_LOG_ALWAYS("dart print: %s", u ? u : "");
     kernel_free(u);
   } else {
     dbgserial_putstr("(null)");

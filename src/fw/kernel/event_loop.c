@@ -585,10 +585,13 @@ static NOINLINE void prv_launcher_main_loop_init(void) {
   serial_console_enable_prompt();
 
 #if defined(CONFIG_DART_RUNTIME)
-  // One-shot at boot: verify the Dart/Wasm runtime executes on this hardware.
-  // The result is logged (visible via `pebble logs`). The smoke test fits SRAM;
-  // the full Dart module additionally needs the PSRAM pool.
+  // One-shot at boot, results logged (visible via `pebble logs`):
+  //  1. the no-GC wasm smoke test — proves WAMR executes wasm on this hardware;
+  //  2. the full dart2wasm module — reveals whether obelix's SRAM runs it as-is
+  //     (prints "...sum=45") or how much it's short (graceful failure -> PSRAM).
+  // Both fail gracefully; neither crashes the watch.
   dart_run_wasm_smoketest();
+  dart_run_test_module();
 #endif
 }
 
