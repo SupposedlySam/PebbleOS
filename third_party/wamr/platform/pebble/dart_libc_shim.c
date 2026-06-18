@@ -1,0 +1,143 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
+/* libc functions WAMR needs that PebbleOS's pblibc does not provide. The
+   symbols are absent (not just undeclared), so we implement them here. These
+   are simple, correct-enough implementations; the float-parsing ones are not
+   on any path the on-device modules currently exercise. */
+
+#include <ctype.h>
+#include <math.h>
+#include <stddef.h>
+#include <string.h>
+
+int strncasecmp(const char *a, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    int ca = tolower((unsigned char)a[i]);
+    int cb = tolower((unsigned char)b[i]);
+    if (ca != cb) {
+      return ca - cb;
+    }
+    if (ca == 0) {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+char *strtok_r(char *str, const char *delim, char **saveptr) {
+  if (str == NULL) {
+    str = *saveptr;
+  }
+  str += strspn(str, delim);
+  if (*str == '\0') {
+    *saveptr = str;
+    return NULL;
+  }
+  char *end = str + strcspn(str, delim);
+  if (*end != '\0') {
+    *end++ = '\0';
+  }
+  *saveptr = end;
+  return str;
+}
+
+unsigned long long strtoull(const char *s, char **endptr, int base) {
+  while (*s == ' ' || *s == '\t') {
+    s++;
+  }
+  if (base == 0) {
+    base = 10;
+  }
+  unsigned long long v = 0;
+  for (;;) {
+    char c = *s;
+    int d;
+    if (c >= '0' && c <= '9') {
+      d = c - '0';
+    } else if (c >= 'a' && c <= 'z') {
+      d = c - 'a' + 10;
+    } else if (c >= 'A' && c <= 'Z') {
+      d = c - 'A' + 10;
+    } else {
+      break;
+    }
+    if (d >= base) {
+      break;
+    }
+    v = v * (unsigned long long)base + (unsigned long long)d;
+    s++;
+  }
+  if (endptr) {
+    *endptr = (char *)s;
+  }
+  return v;
+}
+
+long long strtoll(const char *s, char **endptr, int base) {
+  while (*s == ' ' || *s == '\t') {
+    s++;
+  }
+  int neg = 0;
+  if (*s == '-') {
+    neg = 1;
+    s++;
+  } else if (*s == '+') {
+    s++;
+  }
+  unsigned long long v = strtoull(s, endptr, base);
+  return neg ? -(long long)v : (long long)v;
+}
+
+double strtod(const char *s, char **endptr) {
+  while (*s == ' ' || *s == '\t') {
+    s++;
+  }
+  int neg = 0;
+  if (*s == '-') {
+    neg = 1;
+    s++;
+  } else if (*s == '+') {
+    s++;
+  }
+  double v = 0.0;
+  while (*s >= '0' && *s <= '9') {
+    v = v * 10.0 + (*s - '0');
+    s++;
+  }
+  if (*s == '.') {
+    s++;
+    double f = 0.1;
+    while (*s >= '0' && *s <= '9') {
+      v += (*s - '0') * f;
+      f *= 0.1;
+      s++;
+    }
+  }
+  if (endptr) {
+    *endptr = (char *)s;
+  }
+  return neg ? -v : v;
+}
+
+float strtof(const char *s, char **endptr) { return (float)strtod(s, endptr); }
+
+double trunc(double x) { return x < 0.0 ? ceil(x) : floor(x); }
+float truncf(float x) { return (float)trunc((double)x); }
+
+double rint(double x) {
+  double f = floor(x);
+  double d = x - f;
+  if (d < 0.5) {
+    return f;
+  }
+  if (d > 0.5) {
+    return f + 1.0;
+  }
+  /* tie: round to even */
+  return (fmod(f, 2.0) == 0.0) ? f : f + 1.0;
+}
+float rintf(float x) { return (float)rint((double)x); }
+
+/* WAMR's C-API trap path (wasm_runtime_invoke_c_api_native) is compiled but
+   never reached - our natives use the simple NativeSymbol ABI, not wasm_func_t.
+   Stub the one C-API symbol it references so the link resolves. */
+void wasm_trap_delete(void *trap) { (void)trap; }

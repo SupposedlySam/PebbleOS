@@ -310,6 +310,10 @@ def _link_firmware(bld, sources):
             'upng']
     uses.extend(bld.env.FW_APPS)
 
+    if bld.env.CONFIG_DART_RUNTIME:
+        uses.append('wamr')
+        uses.append('wamr_includes')
+
     if bld.env.CONFIG_MEMFAULT:
         fw_linkflags.append('-Wl,--require-defined=g_memfault_build_id')
         uses.append('memfault')
@@ -548,6 +552,9 @@ def _build_normal(bld):
 
     if bld.env.CONFIG_FLUTTER_WATCHFACE:
         source_dirs.append('flutter_bridge')
+
+    if bld.env.CONFIG_DART_RUNTIME:
+        source_dirs.append('dart')
 
     if not bld.env.CONFIG_HRM:
         excludes.append('popups/ble_hrm/**')

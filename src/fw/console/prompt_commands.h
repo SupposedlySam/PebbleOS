@@ -293,9 +293,16 @@ extern void command_display_drop_complete(void);
 #endif
 
 #define KEEP_NON_ESSENTIAL_COMMANDS 1
+#ifdef CONFIG_DART_RUNTIME
+extern void command_dart_test(void);
+#endif
+
 static const Command s_prompt_commands[] = {
   // PULSE entry point, needed for anything PULSE-related to work
   { "PULSEv1", pulse_start, 0 },
+#ifdef CONFIG_DART_RUNTIME
+  { "dart test", command_dart_test, 0 },
+#endif
 #if KEEP_NON_ESSENTIAL_COMMANDS == 1
   // ====================================================================================
   // NOTE: The following commands are used by test automation.

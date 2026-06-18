@@ -41,6 +41,7 @@ if bld.env.CONFIG_DART_RUNTIME:
         core + '/shared/utils/bh_queue.c',
         core + '/shared/utils/bh_vector.c',
         'platform/pebble/platform_pebble.c',
+        'platform/pebble/dart_libc_shim.c',
     ]
 
     wamr_defines = [
