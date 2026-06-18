@@ -8,6 +8,7 @@
 
 #include "console/dbgserial.h"
 #include "kernel/pbl_malloc.h"
+#include "pbl/services/system_task.h"
 #include "system/logging.h"
 
 #include "wasm_export.h"
@@ -276,4 +277,18 @@ done:
 void command_dart_wasm(void) {
   bool ok = dart_run_wasm_smoketest();
   PBL_LOG_ALWAYS("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
+}
+
+static void prv_dart_smoketest_cb(void *data) {
+  (void)data;
+  dart_run_wasm_smoketest();
+}
+
+void dart_runtime_schedule_smoketest(void) {
+  // Queue on the KernelBG system task. This runs OFF the boot path, so it can
+  // never block KernelMain / trip the watchdog (the bug that bricked a watch).
+  // The smoke test is tiny (no GC, no PSRAM) so it completes well within the
+  // system task's budget. Result is logged (retrievable via `pebble fw
+  // flash-logs`).
+  system_task_add_callback(prv_dart_smoketest_cb, NULL);
 }

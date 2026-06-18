@@ -25,3 +25,7 @@ bool dart_run_test_module(void);
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);
+
+//! Queue the wasm smoke test onto the KernelBG system task (runs off the boot
+//! path; safe to call from boot without blocking it). Result is logged.
+void dart_runtime_schedule_smoketest(void);

@@ -84,6 +84,10 @@
 #include "util/struct.h"
 #include "system/version.h"
 
+#if defined(CONFIG_DART_RUNTIME)
+#include "dart/dart_runtime.h"
+#endif
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -580,12 +584,14 @@ static NOINLINE void prv_launcher_main_loop_init(void) {
   notify_system_ready_for_communication();
   serial_console_enable_prompt();
 
-  // NOTE: Do NOT run the Dart runtime synchronously here. This executes in
-  // KernelMain BEFORE the main loop starts feeding the KernelMain watchdog, so
-  // any work longer than the watchdog timeout (the full-module load + psleep
-  // vibes did this on hardware) causes a reset -> boot loop. The Dart tests are
-  // available via the `dart test` / `dart wasm` console commands; an on-boot
-  // trigger must be a watchdog-fed deferred task, not a blocking call here.
+#if defined(CONFIG_DART_RUNTIME)
+  // Run the Dart/wasm smoke test, but NEVER synchronously here: this is
+  // KernelMain before the main loop feeds the watchdog, and a blocking call
+  // bricked a watch (boot loop). dart_runtime_schedule_smoketest() only QUEUES
+  // a callback onto the KernelBG system task and returns immediately, so the
+  // work runs off the boot path. Result is logged (see `pebble fw flash-logs`).
+  dart_runtime_schedule_smoketest();
+#endif
 }
 
 void launcher_main_loop(void) {
