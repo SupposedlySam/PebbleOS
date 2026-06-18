@@ -21,3 +21,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size);
 //! Run the built-in hello-world test module (when CONFIG_DART_RUNTIME). Useful
 //! from the console to validate the runtime end to end.
 bool dart_run_test_module(void);
+
+//! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
+//! the firmware. Small enough to run from SRAM (no PSRAM needed).
+bool dart_run_wasm_smoketest(void);

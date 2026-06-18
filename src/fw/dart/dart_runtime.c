@@ -4,6 +4,7 @@
 #include "dart_runtime.h"
 #include "dart_embedder.h"
 #include "dart_test_module.h"
+#include "wasm_smoketest_module.h"
 
 #include "console/dbgserial.h"
 #include "kernel/pbl_malloc.h"
@@ -13,6 +14,7 @@
 #include "gc_export.h"
 
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 /* The WasmGC objects live in the GC heap (init_args.gc_heap_size); the
@@ -22,7 +24,10 @@
    (Alloc_With_Pool over the ~8 MB PSRAM on obelix). Validated on QEMU: the
    runtime initializes and dispatches; allocation is the gate. */
 #ifndef DART_GC_HEAP_SIZE
-#define DART_GC_HEAP_SIZE (96 * 1024)
+/* Allocated per-instance at instantiate even for non-GC modules. Kept small so
+   the no-GC smoke test fits the SRAM kernel heap; the full Dart module needs a
+   much larger GC heap from a PSRAM pool. */
+#define DART_GC_HEAP_SIZE (32 * 1024)
 #endif
 #define DART_APP_STACK_SIZE (12 * 1024)
 #define DART_APP_HEAP_SIZE (12 * 1024)
@@ -198,4 +203,77 @@ bool dart_run_test_module(void) {
 void command_dart_test(void) {
   bool ok = dart_run_test_module();
   dbgserial_putstr(ok ? "dart: test OK" : "dart: test FAILED");
+}
+
+//! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
+//! firmware. Small enough for SRAM, so it works without PSRAM. Returns true if
+//! the result is 42.
+bool dart_run_wasm_smoketest(void) {
+  char error_buf[128];
+  uint8_t *buf = NULL;
+  wasm_module_t module = NULL;
+  wasm_module_inst_t inst = NULL;
+  wasm_exec_env_t exec_env = NULL;
+  bool ok = false;
+
+  if (!dart_runtime_init()) {
+    return false;
+  }
+
+  buf = (uint8_t *)wasm_runtime_malloc(g_wasm_add_module_size);
+  if (!buf) {
+    PBL_LOG_ERR("dart: smoketest no RAM");
+    return false;
+  }
+  memcpy(buf, g_wasm_add_module, g_wasm_add_module_size);
+
+  module = wasm_runtime_load(buf, g_wasm_add_module_size, error_buf,
+                             sizeof(error_buf));
+  if (!module) {
+    PBL_LOG_ERR("dart: smoketest load failed: %s", error_buf);
+    goto done;
+  }
+  inst = wasm_runtime_instantiate(module, 8 * 1024, 8 * 1024, error_buf,
+                                  sizeof(error_buf));
+  if (!inst) {
+    PBL_LOG_ERR("dart: smoketest instantiate failed: %s", error_buf);
+    goto done;
+  }
+  exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
+  wasm_function_inst_t add_func = wasm_runtime_lookup_function(inst, "add");
+  if (!add_func) {
+    PBL_LOG_ERR("dart: smoketest no 'add' export");
+    goto done;
+  }
+
+  uint32_t argv[2] = {40, 2};
+  if (!wasm_runtime_call_wasm(exec_env, add_func, 2, argv)) {
+    PBL_LOG_ERR("dart: smoketest trap: %s", wasm_runtime_get_exception(inst));
+    goto done;
+  }
+
+  PBL_LOG_INFO("dart: wasm smoketest add(40,2)=%u %s", (unsigned)argv[0],
+               argv[0] == 42 ? "OK" : "WRONG");
+  ok = (argv[0] == 42);
+
+done:
+  if (exec_env) {
+    wasm_runtime_destroy_exec_env(exec_env);
+  }
+  if (inst) {
+    wasm_runtime_deinstantiate(inst);
+  }
+  if (module) {
+    wasm_runtime_unload(module);
+  }
+  if (buf) {
+    wasm_runtime_free(buf);
+  }
+  return ok;
+}
+
+//! Console command: `dart wasm` runs the tiny WAMR smoke test.
+void command_dart_wasm(void) {
+  bool ok = dart_run_wasm_smoketest();
+  PBL_LOG_INFO("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
 }

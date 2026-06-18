@@ -295,6 +295,7 @@ extern void command_display_drop_complete(void);
 #define KEEP_NON_ESSENTIAL_COMMANDS 1
 #ifdef CONFIG_DART_RUNTIME
 extern void command_dart_test(void);
+extern void command_dart_wasm(void);
 #endif
 
 static const Command s_prompt_commands[] = {
@@ -302,6 +303,7 @@ static const Command s_prompt_commands[] = {
   { "PULSEv1", pulse_start, 0 },
 #ifdef CONFIG_DART_RUNTIME
   { "dart test", command_dart_test, 0 },
+  { "dart wasm", command_dart_wasm, 0 },
 #endif
 #if KEEP_NON_ESSENTIAL_COMMANDS == 1
   // ====================================================================================
