@@ -4,6 +4,10 @@
 bld.env.SERVICES = []
 bld.env.SERVICES_TEXT = []
 
+# Remote-console endpoint (0x4000). Always built so the endpoint-table callback
+# symbol exists; the endpoint is harmless when nothing sends to it.
+bld.recurse('dev_console')
+
 if bld.env.CONFIG_SERVICE_ACCEL_MANAGER:
     bld.recurse('accel_manager')
 if bld.env.CONFIG_SERVICE_ACTIVITY:

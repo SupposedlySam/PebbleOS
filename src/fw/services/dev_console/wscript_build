@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jonah Walker
+# SPDX-License-Identifier: Apache-2.0
+
+bld.stlib(
+    use=['fw_includes'],
+    source=['dev_console.c'],
+    target='services_dev_console',
+)
+bld.env.SERVICES.append('services_dev_console')
+
+# vim:filetype=python

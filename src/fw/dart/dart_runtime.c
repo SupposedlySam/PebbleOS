@@ -7,6 +7,7 @@
 #include "wasm_smoketest_module.h"
 
 #include "console/dbgserial.h"
+#include "console/prompt.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/system_task.h"
 #include "system/logging.h"
@@ -205,7 +206,8 @@ bool dart_run_test_module(void) {
 //! Console command: `dart test` runs the built-in hello module.
 void command_dart_test(void) {
   bool ok = dart_run_test_module();
-  dbgserial_putstr(ok ? "dart: test OK" : "dart: test FAILED");
+  char buf[64];
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: test %s", ok ? "OK" : "FAILED");
 }
 
 //! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
@@ -286,7 +288,9 @@ done:
 //! Console command: `dart wasm` runs the tiny WAMR smoke test.
 void command_dart_wasm(void) {
   bool ok = dart_run_wasm_smoketest();
-  PBL_LOG_ALWAYS("dart: wasm smoketest %s", ok ? "OK" : "FAILED");
+  char buf[64];
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: wasm smoketest %s",
+                           ok ? "OK (add(40,2)=42)" : "FAILED");
 }
 
 /* Stepped smoke test for the on-screen diagnostic app. Each WAMR stage runs in
