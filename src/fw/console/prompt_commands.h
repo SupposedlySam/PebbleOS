@@ -319,6 +319,7 @@ static const Command s_prompt_commands[] = {
   { "click multiple", command_button_press_multiple, 4 },
   { "click long", command_button_press, 2 },
   { "reset", command_reset, 0 },
+  { "boot prf", command_boot_prf, 0 },  // headless reboot into recovery (PRF)
   { "crash", command_crash, 0 },
   { "hard crash", command_hard_crash, 0 },
 #ifndef CONFIG_RECOVERY_FW
