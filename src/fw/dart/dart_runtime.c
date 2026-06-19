@@ -8,9 +8,11 @@
 
 #include "console/dbgserial.h"
 #include "console/prompt.h"
+#include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/system_task.h"
 #include "system/logging.h"
+#include "util/heap.h"
 
 #include "wasm_export.h"
 #include "gc_export.h"
@@ -134,6 +136,9 @@ static bool prv_call_invoke_main(wasm_module_t module, wasm_module_inst_t inst,
   return true;
 }
 
+//! Human-readable reason the last dart_run_module() failed (for the console).
+static char s_module_fail[96];
+
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
   uint8_t *module_buf = NULL;
@@ -141,8 +146,10 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   wasm_module_inst_t inst = NULL;
   wasm_exec_env_t exec_env = NULL;
   bool ok = false;
+  s_module_fail[0] = '\0';
 
   if (!dart_runtime_init()) {
+    strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     return false;
   }
 
@@ -153,6 +160,8 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   module_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
   if (!module_buf) {
     PBL_LOG_ERR("dart: no RAM for module copy (%" PRIu32 " bytes)", wasm_size);
+    snprintf(s_module_fail, sizeof(s_module_fail), "no RAM for %u-byte copy",
+             (unsigned)wasm_size);
     return false;
   }
   memcpy(module_buf, wasm_buf, wasm_size);
@@ -160,6 +169,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   module = wasm_runtime_load(module_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!module) {
     PBL_LOG_ERR("dart: load failed: %s", error_buf);
+    snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
     goto cleanup;
   }
 
@@ -168,6 +178,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
                                   sizeof(error_buf));
   if (!inst) {
     PBL_LOG_ERR("dart: instantiate failed: %s", error_buf);
+    snprintf(s_module_fail, sizeof(s_module_fail), "instantiate: %.70s", error_buf);
     goto cleanup;
   }
 
@@ -203,11 +214,18 @@ bool dart_run_test_module(void) {
   return dart_run_module(g_dart_test_module, g_dart_test_module_size);
 }
 
-//! Console command: `dart test` runs the built-in hello module.
+//! Console command: `dart test` runs the built-in hello module. Reports the
+//! free kernel heap (the SRAM gap for the full module) and the failing stage.
 void command_dart_test(void) {
+  char buf[128];
+  unsigned int used, free_bytes, max_free;
+  heap_calc_totals(kernel_heap_get(), &used, &free_bytes, &max_free);
+  prompt_send_response_fmt(buf, sizeof(buf),
+                           "kernel heap: free=%u max_block=%u (module=%u)",
+                           free_bytes, max_free, (unsigned)g_dart_test_module_size);
   bool ok = dart_run_test_module();
-  char buf[64];
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: test %s", ok ? "OK" : "FAILED");
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: test %s%s%s", ok ? "OK" : "FAILED",
+                           s_module_fail[0] ? " - " : "", s_module_fail);
 }
 
 //! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
