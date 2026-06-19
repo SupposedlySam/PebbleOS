@@ -17,6 +17,10 @@
 #include "wasm_export.h"
 #include "gc_export.h"
 
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+#include "soc/sf32lb/sf32lb52x/psram.h"
+#endif
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,6 +54,16 @@ static bool s_initialized = false;
    init + load succeed; instantiate is gated on RAM). A dedicated pool can be
    provided by overriding dart_runtime_pool() (weak) to return a PSRAM region. */
 __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  // Once `psram` has brought up the 16 MB PSRAM, back the WAMR pool with it so
+  // the full module's 67 KB copy + GC heap + linear memory fit. Bring up PSRAM
+  // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
+  if (sf32lb52_psram_is_ready()) {
+    *buf = (void *)SF32LB52_PSRAM_BASE;
+    *size = 8u * 1024u * 1024u;  // 8 MB of the 16 MB for the WAMR global pool
+    return true;
+  }
+#endif
   (void)buf;
   (void)size;
   return false;

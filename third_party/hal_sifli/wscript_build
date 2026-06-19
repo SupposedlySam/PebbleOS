@@ -22,6 +22,9 @@ micro_sources = [
     'SiFli-SDK/drivers/hal/bf0_hal_pmu.c',
     'SiFli-SDK/drivers/hal/bf0_hal_rcc.c',
     'SiFli-SDK/drivers/hal/bf0_sys_cfg.c',
+    # PSRAM bring-up (HAL_MPI_PSRAM_Init) for the Dart/WAMR pool on obelix.
+    'SiFli-SDK/drivers/hal/bf0_hal_mpi_psram.c',
+    'SiFli-SDK/drivers/hal/bf0_hal_mpi.c',
 ]
 
 # bf0_hal_aes.c implements both AES and HASH

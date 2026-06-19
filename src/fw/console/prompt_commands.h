@@ -296,6 +296,9 @@ extern void command_display_drop_complete(void);
 #ifdef CONFIG_DART_RUNTIME
 extern void command_dart_test(void);
 extern void command_dart_wasm(void);
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+extern void command_psram(const char *div_str);  // sf32lb52x PSRAM bring-up
+#endif
 #endif
 
 static const Command s_prompt_commands[] = {
@@ -304,6 +307,9 @@ static const Command s_prompt_commands[] = {
 #ifdef CONFIG_DART_RUNTIME
   { "dart test", command_dart_test, 0 },
   { "dart wasm", command_dart_wasm, 0 },
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  { "psram", command_psram, 1 },
+#endif
 #endif
 #if KEEP_NON_ESSENTIAL_COMMANDS == 1
   // ====================================================================================
