@@ -55,10 +55,13 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, uint32_t *pid_out) {
   // 2. Restore the PSRAM pin mux.
   prv_restore_pinmux();
 
-  // 3. MPI1 (FLASH1) clock from the SYSTEM clock. obelix runs its sysclk off
-  //    DLL1 (enabled); DLL2/DLL3 are NOT enabled, so selecting them would leave
-  //    MPI1 with no clock and HAL_MPI_PSRAM_Init spins forever -> watchdog reset.
-  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_SYSCLK);
+  // 3. Enable DLL2 (288 MHz) and run MPI1 (FLASH1) off it, exactly like the SiFli
+  //    boot path for PSRAM (bsp_init.c: EnableDLL2(288M) -> ClockSelect FLASH1 DLL2,
+  //    mpi1_div=2 -> 144 MHz). SYSCLK lets the controller init (HAL_OK) but HYPERBUS
+  //    reads come back wrong; the PSRAM calibrates against the DLL2 clock. DLL2 must
+  //    be ENABLED before selecting it (else MPI1 has no clock and the init hangs).
+  HAL_RCC_HCPU_EnableDLL2(288000000);
+  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
 
   // Feed the KernelBG watchdog: the controller init/calibration can be slow.
   prompt_watchdog_feed();
@@ -109,9 +112,12 @@ static int prv_psram_test(int words, uint32_t *fail_idx) {
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
-//! Console command: `psram <div>` — bring up PSRAM with the given MPI1 clock
-//! divider (default 2) and run a write/read test. Tune <div> headlessly.
-void command_psram(const char *div_str) {
+//! Console command: `psram <div> [dqs]`. div = MPI1 clock divider (default 2).
+//! HYPERBUS (HBPSRAM) is NOT DQS-calibrated by HAL_MPI_PSRAM_Init (calibration is
+//! OPSRAM-only), so HYPERBUS reads come back wrong with the default DQS delay. Pass
+//! [dqs] (0..31) to set the DQS delay manually and sweep it headlessly to find the
+//! value that makes the write/read test pass; >31 or omitted = HAL default (no set).
+void command_psram(const char *div_str, const char *dqs_str) {
   char buf[128];
   uint16_t div = 2;
   if (div_str && div_str[0]) {
@@ -120,11 +126,19 @@ void command_psram(const char *div_str) {
       div = (uint16_t)v;
     }
   }
+  int dqs = -1;
+  if (dqs_str && dqs_str[0]) {
+    dqs = atoi(dqs_str);
+  }
 
   uint32_t pid = 0xff;
   HAL_StatusTypeDef res = prv_psram_init(div, &pid);
-  prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u -> %s",
-                           (unsigned)div, (unsigned)pid,
+  if (res == HAL_OK && dqs >= 0 && dqs <= 31) {
+    HAL_MPI_ENABLE_DQS(&s_psram_handle, 1);
+    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
+  }
+  prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u dqs=%d -> %s",
+                           (unsigned)div, (unsigned)pid, dqs,
                            res == HAL_OK ? "HAL_OK" : "HAL_ERR");
   if (res != HAL_OK) {
     return;

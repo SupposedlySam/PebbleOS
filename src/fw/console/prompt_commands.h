@@ -297,7 +297,7 @@ extern void command_display_drop_complete(void);
 extern void command_dart_test(void);
 extern void command_dart_wasm(void);
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-extern void command_psram(const char *div_str);  // sf32lb52x PSRAM bring-up
+extern void command_psram(const char *div_str, const char *dqs_str);  // sf32lb52x PSRAM bring-up (div + DQS sweep)
 #endif
 #endif
 
@@ -308,7 +308,7 @@ static const Command s_prompt_commands[] = {
   { "dart test", command_dart_test, 0 },
   { "dart wasm", command_dart_wasm, 0 },
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  { "psram", command_psram, 1 },
+  { "psram", command_psram, 2 },
 #endif
 #endif
 #if KEEP_NON_ESSENTIAL_COMMANDS == 1
