@@ -423,6 +423,13 @@ log_error:
           client);
 }
 
+//! Force a fresh rediscovery on connect (cleans up any stale cached services first).
+//! Plain discover_all early-returns when gatt_remote_services is already populated,
+//! which leaves a bonded gateway pointing at a previous session's service handles
+//! (the Mac re-hosts the PPoG GATT server with new handles each run) -> PPoGATT
+//! never re-attaches. Rediscovering on every connect avoids needing a re-pair.
+extern BTErrno gatt_client_discovery_rediscover_all(const BTDeviceInternal *device);
+
 static void prv_handle_connection_event(const PebbleBLEConnectionEvent *event) {
   PBL_LOG_DBG("PEBBLE_BLE_CONNECTION_EVENT: reason=0x%x, conn=%u, bond=%u",
           event->hci_reason, event->connected, event->bonding_id);
@@ -445,7 +452,7 @@ static void prv_handle_connection_event(const PebbleBLEConnectionEvent *event) {
     ppogatt_create();
 
     gap_le_slave_reconnect_stop();
-    gatt_client_discovery_discover_all(&device);
+    gatt_client_discovery_rediscover_all(&device);
 
   } else {
     PBL_LOG_DBG("Disconnected from Gateway!");
