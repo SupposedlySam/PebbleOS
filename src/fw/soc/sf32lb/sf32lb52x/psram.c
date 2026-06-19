@@ -155,3 +155,43 @@ void command_psram(const char *div_str, const char *dqs_str) {
                              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
   }
 }
+
+//! Console command: `psram_sweep [div]` — HYPERBUS DQS calibration sweep done
+//! entirely on-watch (no BLE round-trips; round-trip sweeping drops the session
+//! mid-sweep). Tries div 2..4 x dqs 0..31, runs the write/read test for each, and
+//! reports the FIRST (div,dqs) that passes. div=1 is skipped (288 MHz hangs). If a
+//! div is given, only that div is swept.
+void command_psram_sweep(const char *div_str) {
+  char buf[128];
+  uint16_t div_lo = 2, div_hi = 4;
+  if (div_str && div_str[0]) {
+    int v = atoi(div_str);
+    if (v >= 2 && v <= 16) {
+      div_lo = div_hi = (uint16_t)v;
+    }
+  }
+  for (uint16_t div = div_lo; div <= div_hi; div++) {
+    uint32_t pid = 0xff;
+    if (prv_psram_init(div, &pid) != HAL_OK) {
+      prompt_send_response_fmt(buf, sizeof(buf), "psram_sweep: div=%u init FAIL", (unsigned)div);
+      continue;
+    }
+    HAL_MPI_ENABLE_DQS(&s_psram_handle, 1);
+    for (int dqs = 0; dqs <= 31; dqs++) {
+      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
+      uint32_t fail = 0;
+      int n = prv_psram_test(64, &fail);
+      if (n >= 0) {
+        s_psram_ready = true;
+        prompt_send_response_fmt(buf, sizeof(buf),
+                                 "psram_sweep PASS: div=%u dqs=%d (%d words) - %u MB ready",
+                                 (unsigned)div, dqs, n, PSRAM_MSIZE_MB);
+        return;
+      }
+    }
+    prompt_send_response_fmt(buf, sizeof(buf),
+                             "psram_sweep: div=%u all dqs 0..31 FAIL (pid=%u)",
+                             (unsigned)div, (unsigned)pid);
+  }
+  prompt_send_response_fmt(buf, sizeof(buf), "psram_sweep: no (div,dqs) passed");
+}
