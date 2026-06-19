@@ -118,5 +118,12 @@ void bt_pairability_init(void) {
   // before this init, so we must re-drive gap_le_slave_set_discoverable() if needed.
   s_last_ble_discoverable_state = false;
   bt_pairability_update_due_to_bonding_change();
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  // Dev affordance: hold a permanent pairability reference so the watch stays
+  // BLE-discoverable even while bonded. Stock firmware uses a single-phone policy
+  // (discoverable only when unpaired), which leaves a bonded watch doing silent
+  // reconnection advertising that a host Mac-BLE client can't re-acquire.
+  bt_pairability_use();
+#endif
   prv_schedule_evaluation();
 }
