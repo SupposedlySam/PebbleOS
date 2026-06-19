@@ -55,8 +55,13 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, uint32_t *pid_out) {
   // 2. Restore the PSRAM pin mux.
   prv_restore_pinmux();
 
-  // 3. MPI1 (FLASH1) clock from DLL2.
-  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
+  // 3. MPI1 (FLASH1) clock from the SYSTEM clock. obelix runs its sysclk off
+  //    DLL1 (enabled); DLL2/DLL3 are NOT enabled, so selecting them would leave
+  //    MPI1 with no clock and HAL_MPI_PSRAM_Init spins forever -> watchdog reset.
+  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_SYSCLK);
+
+  // Feed the KernelBG watchdog: the controller init/calibration can be slow.
+  prompt_watchdog_feed();
 
   // 4. Detect PSRAM type from the chip ID register + init the controller.
   uint32_t pid = (hwp_hpsys_cfg->IDR & HPSYS_CFG_IDR_PID_Msk) >> HPSYS_CFG_IDR_PID_Pos;
