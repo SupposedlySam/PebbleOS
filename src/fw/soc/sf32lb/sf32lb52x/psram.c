@@ -68,7 +68,9 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div) {
   prv_restore_pinmux();
 
   // MPI1 (FLASH1) off DLL2 @ 288 MHz; div 2 -> 144 MHz, per the SiFli board_init_psram
-  // path. Done once -- re-selecting the clock while MPI1 is live hangs.
+  // path. Reference enables DLL2 at 240 THEN 288 (two-step lock) -- replicate it; a
+  // single EnableDLL2(288) may not lock. Done once -- re-selecting the clock hangs.
+  HAL_RCC_HCPU_EnableDLL2(240000000);
   HAL_RCC_HCPU_EnableDLL2(288000000);
   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
 
@@ -138,6 +140,11 @@ void command_psram(const char *div_str) {
   prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u -> %s",
                            (unsigned)div, (unsigned)s_psram_pid,
                            res == HAL_OK ? "HAL_OK" : "HAL_ERR");
+  // Diagnostic: report the actual clock so we can tell if DLL2 locked (288 MHz ->
+  // FLASH1/div2 = 144 MHz) vs a wrong/unlocked clock corrupting the data path.
+  prompt_send_response_fmt(buf, sizeof(buf), "psram clk: dll2=%uHz flash1_src=%d",
+                           (unsigned)HAL_RCC_HCPU_GetDLL2Freq(),
+                           (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH1));
   if (res != HAL_OK) {
     return;
   }
