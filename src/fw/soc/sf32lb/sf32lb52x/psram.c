@@ -117,8 +117,17 @@ bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 //! OPSRAM-only), so HYPERBUS reads come back wrong with the default DQS delay. Pass
 //! [dqs] (0..31) to set the DQS delay manually and sweep it headlessly to find the
 //! value that makes the write/read test pass; >31 or omitted = HAL default (no set).
+void command_psram_sweep(const char *div_str);  // fwd decl (defined below)
+
 void command_psram(const char *div_str, const char *dqs_str) {
   char buf[128];
+  // `psram <div> sweep` (or `psram <div> s`) -> on-watch single-init DQS sweep. The
+  // console matches commands by prefix, so a standalone "psram_sweep" resolves to
+  // "psram"; dispatch the sweep from here instead.
+  if (dqs_str && (dqs_str[0] == 's' || dqs_str[0] == 'S')) {
+    command_psram_sweep(div_str);
+    return;
+  }
   uint16_t div = 2;
   if (div_str && div_str[0]) {
     int v = atoi(div_str);
