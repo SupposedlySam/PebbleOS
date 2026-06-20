@@ -38,6 +38,11 @@ static HAL_StatusTypeDef s_psram_init_res = HAL_ERROR;
 static uint32_t s_psram_pid = 0xff;
 
 //! Restore the PSRAM pin mux (undo init.c's HAL_PIN_Set_Analog parking).
+//! EXACT Winbond HYPERBUS mapping, per SiFli board_pinmux_psram_func1_2_4 case 4
+//! ("Winbond 32/64/128p"): 8 data + CLK + CS + DQSDM(NOPULL). Critically, the
+//! Winbond part does NOT use DM (SA00) or CLKB (SA06) -- the reference leaves them
+//! ANALOG and explicitly comments CLKB out. Driving them (as the OPI variant does)
+//! corrupts the data path -> reads fail at word 0.
 static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA01, MPI1_DIO0, PIN_PULLDOWN, 1);
   HAL_PIN_Set(PAD_SA02, MPI1_DIO1, PIN_PULLDOWN, 1);
@@ -49,9 +54,9 @@ static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA11, MPI1_DIO7, PIN_PULLDOWN, 1);
   HAL_PIN_Set(PAD_SA07, MPI1_CLK, PIN_NOPULL, 1);
   HAL_PIN_Set(PAD_SA05, MPI1_CS, PIN_NOPULL, 1);
-  HAL_PIN_Set(PAD_SA00, MPI1_DM, PIN_PULLDOWN, 1);
-  HAL_PIN_Set(PAD_SA06, MPI1_CLKB, PIN_NOPULL, 1);
-  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_PULLDOWN, 1);
+  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_NOPULL, 1);
+  HAL_PIN_Set_Analog(PAD_SA00, 1);  // DM unused on Winbond HYPERBUS
+  HAL_PIN_Set_Analog(PAD_SA06, 1);  // CLKB unused on Winbond HYPERBUS
 }
 
 //! Bring up the MPI1 PSRAM controller exactly ONCE. Idempotent: later calls return
