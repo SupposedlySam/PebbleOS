@@ -1,14 +1,21 @@
 /* SPDX-FileCopyrightText: 2026 Jonah Walker */
 /* SPDX-License-Identifier: Apache-2.0 */
 
-//! PSRAM bring-up for obelix (SF32LB52J: 16 MB OPI-PSRAM on MPI1 @ 0x60000000).
-//! init.c parks PSRAM at boot (disables the 1.8 V LDO, sets PAD_SA00-SA12
-//! analog). This un-parks it and initializes the MPI1 PSRAM controller so it can
-//! back the Dart/WAMR pool. Driven by the `psram` console command so it can be
-//! tuned headlessly (clock divider) without auto-running at boot.
+//! PSRAM bring-up for obelix (SF32LB52J: 16 MB Winbond HYPERBUS PSRAM on MPI1,
+//! mapped at 0x60000000 SBUS / 0x10000000 CBUS). init.c parks PSRAM at boot
+//! (sets PAD_SA00-SA12 analog; LDO18 is left off because the PSRAM is powered by
+//! VDD_SiP, not the internal 1.8 V LDO). This un-parks the pins and brings up the
+//! MPI1 controller so it can back the Dart/WAMR pool, driven by the `psram`
+//! console command (not auto-run at boot).
 //!
-//! Sequence templated from SiFli's sf32lb52-lcd_base board_init_psram() +
-//! common/flash.c bsp_psramc_init() + sf32lb52-lcd_base bsp_pinmux.c.
+//! Mirrors the SiFli SF32LB52 reference exactly (OpenSiFli/SiFli-SDK
+//! customer/boards/.../bsp_init.c board_init_psram + common/flash.c
+//! bsp_psramc_init): clock MPI1 (FLASH1) off DLL2 @ 288 MHz / div 2 = 144 MHz,
+//! then HAL_MPI_PSRAM_Init(handle, cfg, div) with wakeup=0. No manual DQS /
+//! calibration -- the HAL handles HBPSRAM internally; the earlier DQS sweep was a
+//! dead end. KEY: do NOT enable LDO18 (it fights the external VDD_SiP rail and
+//! corrupts reads), and bring the controller up exactly ONCE (re-selecting the
+//! DLL2 clock while MPI1 is live HANGS/resets the watch).
 
 #include <bf0_hal.h>
 
@@ -26,8 +33,11 @@
 
 static FLASH_HandleTypeDef s_psram_handle;
 static bool s_psram_ready;
+static bool s_psram_inited;                          // controller brought up (re-init hangs)
+static HAL_StatusTypeDef s_psram_init_res = HAL_ERROR;
+static uint32_t s_psram_pid = 0xff;
 
-//! Restore the octal PSRAM pin mux (undo init.c's HAL_PIN_Set_Analog parking).
+//! Restore the PSRAM pin mux (undo init.c's HAL_PIN_Set_Analog parking).
 static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA01, MPI1_DIO0, PIN_PULLDOWN, 1);
   HAL_PIN_Set(PAD_SA02, MPI1_DIO1, PIN_PULLDOWN, 1);
@@ -44,55 +54,54 @@ static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_PULLDOWN, 1);
 }
 
-//! Bring up the MPI1 PSRAM controller. div = MPI1 clock divider (sweepable).
-//! Returns HAL_OK on success; fills *pid with the detected PSRAM type id.
-static HAL_StatusTypeDef prv_psram_init(uint16_t div, uint32_t *pid_out) {
-  // 1. Re-enable the 1.8 V LDO that feeds PSRAM (undo init.c's power-down).
-  hwp_pmuc->PERI_LDO &= ~PMUC_PERI_LDO_LDO18_PD_Msk;
-  hwp_pmuc->PERI_LDO |= PMUC_PERI_LDO_EN_LDO18_Msk;
-  HAL_Delay_us(150);
+//! Bring up the MPI1 PSRAM controller exactly ONCE. Idempotent: later calls return
+//! the cached result without touching the clock/controller (re-init hangs the watch).
+//! div = MPI1 clock divider (canonical = 2 -> DLL2 288 MHz / 2 = 144 MHz).
+static HAL_StatusTypeDef prv_psram_init(uint16_t div) {
+  if (s_psram_inited) {
+    return s_psram_init_res;
+  }
 
-  // 2. Restore the PSRAM pin mux.
+  // PSRAM is powered by VDD_SiP, not the internal 1.8 V LDO18 (init.c disables LDO18
+  // for exactly this reason). Do NOT enable LDO18 -- it fights the external SiP rail
+  // and corrupts reads. Just un-park the pins and clock the controller.
   prv_restore_pinmux();
 
-  // 3. Enable DLL2 (288 MHz) and run MPI1 (FLASH1) off it, exactly like the SiFli
-  //    boot path for PSRAM (bsp_init.c: EnableDLL2(288M) -> ClockSelect FLASH1 DLL2,
-  //    mpi1_div=2 -> 144 MHz). SYSCLK lets the controller init (HAL_OK) but HYPERBUS
-  //    reads come back wrong; the PSRAM calibrates against the DLL2 clock. DLL2 must
-  //    be ENABLED before selecting it (else MPI1 has no clock and the init hangs).
+  // MPI1 (FLASH1) off DLL2 @ 288 MHz; div 2 -> 144 MHz, per the SiFli board_init_psram
+  // path. Done once -- re-selecting the clock while MPI1 is live hangs.
   HAL_RCC_HCPU_EnableDLL2(288000000);
   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
 
-  // Feed the KernelBG watchdog: the controller init/calibration can be slow.
+  // Feed the KernelBG watchdog: controller init can be slow.
   prompt_watchdog_feed();
 
-  // 4. Detect PSRAM type from the chip ID register + init the controller.
-  uint32_t pid = (hwp_hpsys_cfg->IDR & HPSYS_CFG_IDR_PID_Msk) >> HPSYS_CFG_IDR_PID_Pos;
-  pid &= 7;
-  if (pid_out) {
-    *pid_out = pid;
-  }
+  s_psram_pid = (hwp_hpsys_cfg->IDR & HPSYS_CFG_IDR_PID_Msk) >> HPSYS_CFG_IDR_PID_Pos;
+  s_psram_pid &= 7;
 
   qspi_configure_t cfg;
   memset(&cfg, 0, sizeof(cfg));
-  cfg.Instance = hwp_qspi1;  // MPI1
+  cfg.Instance = hwp_qspi1;     // MPI1
   cfg.msize = PSRAM_MSIZE_MB;
-  cfg.base = QSPI1_MEM_BASE;  // 0x10000000 (CBUS)
-  switch (pid) {
+  cfg.base = QSPI1_MEM_BASE;    // 0x10000000 (CBUS)
+  switch (s_psram_pid) {
     case 5: cfg.SpiMode = SPI_MODE_PSRAM; break;     // 16Mb APM QSPI
     case 4: cfg.SpiMode = SPI_MODE_LEGPSRAM; break;  // 32Mb LEGACY
-    case 6: cfg.SpiMode = SPI_MODE_HBPSRAM; break;   // Winbond HYPERBUS
-    case 2:                                          // 128Mb (=16MB) XCELLA OPI
-    case 3:                                          // 64Mb XCELLA OPI
-    default: cfg.SpiMode = SPI_MODE_OPSRAM; break;   // SF32LB52J is OPI
+    case 6: cfg.SpiMode = SPI_MODE_HBPSRAM; break;   // Winbond HYPERBUS (obelix)
+    case 2:                                          // XCELLA OPI
+    case 3:
+    default: cfg.SpiMode = SPI_MODE_OPSRAM; break;
   }
 
+  // memset zeroes handle.wakeup = 0 (normal, non-standby boot), per the canonical init.
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
-  return HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
+  s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
+  s_psram_inited = true;
+  return s_psram_init_res;
 }
 
 //! Write/read sanity test over the PSRAM window. Returns -1 + the failing index,
-//! else the number of words verified.
+//! else the number of words verified. (Reads always complete once the controller is
+//! up -- a wrong config returns garbage, it does not fault -- so this can't crash.)
 static int prv_psram_test(int words, uint32_t *fail_idx) {
   volatile uint32_t *p = (volatile uint32_t *)PSRAM_TEST_BASE;
   for (int i = 0; i < words; i++) {
@@ -112,22 +121,11 @@ static int prv_psram_test(int words, uint32_t *fail_idx) {
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
-//! Console command: `psram <div> [dqs]`. div = MPI1 clock divider (default 2).
-//! HYPERBUS (HBPSRAM) is NOT DQS-calibrated by HAL_MPI_PSRAM_Init (calibration is
-//! OPSRAM-only), so HYPERBUS reads come back wrong with the default DQS delay. Pass
-//! [dqs] (0..31) to set the DQS delay manually and sweep it headlessly to find the
-//! value that makes the write/read test pass; >31 or omitted = HAL default (no set).
-void command_psram_sweep(const char *div_str);  // fwd decl (defined below)
-
-void command_psram(const char *div_str, const char *dqs_str) {
+//! Console command: `psram [div]` (default div=2). Brings up the PSRAM controller
+//! ONCE (idempotent + crash-safe to re-run; re-init would hang) and runs a write/read
+//! test over the 16 MB window.
+void command_psram(const char *div_str) {
   char buf[128];
-  // `psram <div> sweep` (or `psram <div> s`) -> on-watch single-init DQS sweep. The
-  // console matches commands by prefix, so a standalone "psram_sweep" resolves to
-  // "psram"; dispatch the sweep from here instead.
-  if (dqs_str && (dqs_str[0] == 's' || dqs_str[0] == 'S')) {
-    command_psram_sweep(div_str);
-    return;
-  }
   uint16_t div = 2;
   if (div_str && div_str[0]) {
     int v = atoi(div_str);
@@ -135,19 +133,10 @@ void command_psram(const char *div_str, const char *dqs_str) {
       div = (uint16_t)v;
     }
   }
-  int dqs = -1;
-  if (dqs_str && dqs_str[0]) {
-    dqs = atoi(dqs_str);
-  }
 
-  uint32_t pid = 0xff;
-  HAL_StatusTypeDef res = prv_psram_init(div, &pid);
-  if (res == HAL_OK && dqs >= 0 && dqs <= 31) {
-    HAL_MPI_ENABLE_DQS(&s_psram_handle, 1);
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
-  }
-  prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u dqs=%d -> %s",
-                           (unsigned)div, (unsigned)pid, dqs,
+  HAL_StatusTypeDef res = prv_psram_init(div);
+  prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u -> %s",
+                           (unsigned)div, (unsigned)s_psram_pid,
                            res == HAL_OK ? "HAL_OK" : "HAL_ERR");
   if (res != HAL_OK) {
     return;
@@ -163,43 +152,4 @@ void command_psram(const char *div_str, const char *dqs_str) {
                              "psram test OK (%d words @0x%08x) - %u MB ready",
                              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
   }
-}
-
-//! Console command: `psram_sweep [div]` (default div=2) — HYPERBUS DQS calibration
-//! sweep done entirely on-watch. Re-initing the PSRAM controller (the DLL2 clock
-//! select while MPI1 is live) HANGS/resets the watch, so this inits the controller
-//! exactly ONCE, then loops dqs 0..31 setting only the DQS delay + re-running the
-//! write/read test — no re-init. Reports the first dqs that passes. To try another
-//! divider, run again in a FRESH session (a 2nd init in the same boot hangs).
-void command_psram_sweep(const char *div_str) {
-  char buf[128];
-  uint16_t div = 2;
-  if (div_str && div_str[0]) {
-    int v = atoi(div_str);
-    if (v >= 2 && v <= 16) {
-      div = (uint16_t)v;
-    }
-  }
-  uint32_t pid = 0xff;
-  if (prv_psram_init(div, &pid) != HAL_OK) {
-    prompt_send_response_fmt(buf, sizeof(buf), "psram_sweep: div=%u init FAIL", (unsigned)div);
-    return;
-  }
-  HAL_MPI_ENABLE_DQS(&s_psram_handle, 1);
-  for (int dqs = 0; dqs <= 31; dqs++) {
-    prompt_watchdog_feed();
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
-    uint32_t fail = 0;
-    int n = prv_psram_test(64, &fail);
-    if (n >= 0) {
-      s_psram_ready = true;
-      prompt_send_response_fmt(buf, sizeof(buf),
-                               "psram_sweep PASS: div=%u dqs=%d (%d words) - %u MB ready",
-                               (unsigned)div, dqs, n, PSRAM_MSIZE_MB);
-      return;
-    }
-  }
-  prompt_send_response_fmt(buf, sizeof(buf),
-                           "psram_sweep: div=%u all dqs 0..31 FAIL (pid=%u)",
-                           (unsigned)div, (unsigned)pid);
 }
