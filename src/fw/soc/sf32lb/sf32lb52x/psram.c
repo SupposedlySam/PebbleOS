@@ -154,6 +154,32 @@ void command_psram(const char *div_str) {
     return;
   }
 
+  // Diagnostic (partition the failure, per HAL analysis): the HBPSRAM path
+  // auto-calibrates the SCK/DQS read tap from HCLK/DVFS state, so read back the chip
+  // ID + CR0 + the ACTUAL calibrated clock to tell power/mode/timing/pinmux apart.
+  //  - garbage id      -> chip not talking (power / reset / mode)
+  //  - good id, bad cr0-> HYPERBUS latency not applied
+  //  - qclk/2 != 144M  -> wrong calibration bucket
+  uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+  uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+  uint32_t qclk = HAL_QSPI_GET_CLK(&s_psram_handle);
+  prompt_send_response_fmt(buf, sizeof(buf),
+                           "psram diag: id=0x%04x cr0=0x%04x qclk=%u/2=%u hclk=%u dvfs=%d",
+                           (unsigned)id, (unsigned)cr0, (unsigned)qclk, (unsigned)(qclk / 2u),
+                           (unsigned)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU),
+                           (int)HAL_RCC_HCPU_GetCurrentDvfsMode());
+  // Read-back pattern (SBUS uncached only -- the cached CBUS alias hard-faults if the
+  // path is bad). Distinct values per word: word0 reading word1's value -> latency
+  // shift; a bit-permutation of what was written -> pinmux/data-lane order; unrelated
+  // noise -> power/mode.
+  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;
+  p0[0] = 0xA5A50000u;
+  p0[1] = 0x0000A5A5u;
+  __DSB();
+  prompt_send_response_fmt(buf, sizeof(buf),
+                           "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
+                           (unsigned)p0[0], (unsigned)p0[1]);
+
   uint32_t fail = 0;
   int n = prv_psram_test(256, &fail);
   if (n < 0) {
