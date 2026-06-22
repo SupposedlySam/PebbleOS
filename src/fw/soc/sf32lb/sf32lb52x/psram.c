@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #ifndef PSRAM_TEST_BASE
@@ -128,11 +129,70 @@ static int prv_psram_test(int words, uint32_t *fail_idx) {
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
-//! Console command: `psram [div]` (default div=2). Brings up the PSRAM controller
-//! ONCE (idempotent + crash-safe to re-run; re-init would hang) and runs a write/read
-//! test over the 16 MB window.
+//! Sink for one diagnostic line. Two impls: the console (`psram` command) and the
+//! firmware log ring (boot self-test, readable over plain GATT). Keeps the bring-up +
+//! diagnostic body in ONE place (prv_psram_diag) instead of duplicated per output path.
+typedef void (*PsramEmitFn)(const char *line);
+
+static void prv_emit_console(const char *line) { prompt_send_response(line); }
+
+//! Bring the controller up ONCE (idempotent + crash-safe to re-run; re-init would
+//! hang), run the partition-the-failure diagnostic + a write/read test, and emit each
+//! line via `emit`. Sets s_psram_ready on a passing test. The HBPSRAM path auto-
+//! calibrates the SCK/DQS read tap from HCLK/DVFS state, so we read back chip ID + CR0
+//! + the ACTUAL calibrated clock to tell power/mode/timing/pinmux apart:
+//!   garbage id -> chip not talking (power/reset/mode); good id, bad cr0 -> HYPERBUS
+//!   latency not applied; qclk/2 != 144M -> wrong calibration bucket. The w0 read-back
+//!   uses distinct per-word values: word0==word1's value -> latency shift; a
+//!   bit-permutation -> pinmux/data-lane order; unrelated noise -> power/mode.
+static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
+  char buf[160];
+
+  HAL_StatusTypeDef res = prv_psram_init(div);
+  sniprintf(buf, sizeof(buf), "psram init div=%u pid=%u -> %s", (unsigned)div,
+            (unsigned)s_psram_pid, res == HAL_OK ? "HAL_OK" : "HAL_ERR");
+  emit(buf);
+  sniprintf(buf, sizeof(buf), "psram clk: dll2=%uHz flash1_src=%d",
+            (unsigned)HAL_RCC_HCPU_GetDLL2Freq(),
+            (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH1));
+  emit(buf);
+  if (res != HAL_OK) {
+    return;
+  }
+
+  uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+  uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+  uint32_t qclk = HAL_QSPI_GET_CLK(&s_psram_handle);
+  sniprintf(buf, sizeof(buf),
+            "psram diag: id=0x%04x cr0=0x%04x qclk=%u/2=%u hclk=%u dvfs=%d",
+            (unsigned)id, (unsigned)cr0, (unsigned)qclk, (unsigned)(qclk / 2u),
+            (unsigned)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU),
+            (int)HAL_RCC_HCPU_GetCurrentDvfsMode());
+  emit(buf);
+
+  // SBUS uncached only -- the cached CBUS alias hard-faults if the path is bad.
+  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;
+  p0[0] = 0xA5A50000u;
+  p0[1] = 0x0000A5A5u;
+  __DSB();
+  sniprintf(buf, sizeof(buf), "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
+            (unsigned)p0[0], (unsigned)p0[1]);
+  emit(buf);
+
+  uint32_t fail = 0;
+  int n = prv_psram_test(256, &fail);
+  if (n < 0) {
+    sniprintf(buf, sizeof(buf), "psram test FAIL at word %u", (unsigned)fail);
+  } else {
+    s_psram_ready = true;
+    sniprintf(buf, sizeof(buf), "psram test OK (%d words @0x%08x) - %u MB ready",
+              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
+  }
+  emit(buf);
+}
+
+//! Console command: `psram [div]` (default div=2). Output goes to the console.
 void command_psram(const char *div_str) {
-  char buf[128];
   uint16_t div = 2;
   if (div_str && div_str[0]) {
     int v = atoi(div_str);
@@ -140,54 +200,5 @@ void command_psram(const char *div_str) {
       div = (uint16_t)v;
     }
   }
-
-  HAL_StatusTypeDef res = prv_psram_init(div);
-  prompt_send_response_fmt(buf, sizeof(buf), "psram init div=%u pid=%u -> %s",
-                           (unsigned)div, (unsigned)s_psram_pid,
-                           res == HAL_OK ? "HAL_OK" : "HAL_ERR");
-  // Diagnostic: report the actual clock so we can tell if DLL2 locked (288 MHz ->
-  // FLASH1/div2 = 144 MHz) vs a wrong/unlocked clock corrupting the data path.
-  prompt_send_response_fmt(buf, sizeof(buf), "psram clk: dll2=%uHz flash1_src=%d",
-                           (unsigned)HAL_RCC_HCPU_GetDLL2Freq(),
-                           (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH1));
-  if (res != HAL_OK) {
-    return;
-  }
-
-  // Diagnostic (partition the failure, per HAL analysis): the HBPSRAM path
-  // auto-calibrates the SCK/DQS read tap from HCLK/DVFS state, so read back the chip
-  // ID + CR0 + the ACTUAL calibrated clock to tell power/mode/timing/pinmux apart.
-  //  - garbage id      -> chip not talking (power / reset / mode)
-  //  - good id, bad cr0-> HYPERBUS latency not applied
-  //  - qclk/2 != 144M  -> wrong calibration bucket
-  uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
-  uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
-  uint32_t qclk = HAL_QSPI_GET_CLK(&s_psram_handle);
-  prompt_send_response_fmt(buf, sizeof(buf),
-                           "psram diag: id=0x%04x cr0=0x%04x qclk=%u/2=%u hclk=%u dvfs=%d",
-                           (unsigned)id, (unsigned)cr0, (unsigned)qclk, (unsigned)(qclk / 2u),
-                           (unsigned)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU),
-                           (int)HAL_RCC_HCPU_GetCurrentDvfsMode());
-  // Read-back pattern (SBUS uncached only -- the cached CBUS alias hard-faults if the
-  // path is bad). Distinct values per word: word0 reading word1's value -> latency
-  // shift; a bit-permutation of what was written -> pinmux/data-lane order; unrelated
-  // noise -> power/mode.
-  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;
-  p0[0] = 0xA5A50000u;
-  p0[1] = 0x0000A5A5u;
-  __DSB();
-  prompt_send_response_fmt(buf, sizeof(buf),
-                           "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
-                           (unsigned)p0[0], (unsigned)p0[1]);
-
-  uint32_t fail = 0;
-  int n = prv_psram_test(256, &fail);
-  if (n < 0) {
-    prompt_send_response_fmt(buf, sizeof(buf), "psram test FAIL at word %u", (unsigned)fail);
-  } else {
-    s_psram_ready = true;
-    prompt_send_response_fmt(buf, sizeof(buf),
-                             "psram test OK (%d words @0x%08x) - %u MB ready",
-                             n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
-  }
+  prv_psram_diag(div, prv_emit_console);
 }
