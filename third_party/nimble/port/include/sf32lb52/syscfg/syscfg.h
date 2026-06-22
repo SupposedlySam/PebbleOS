@@ -901,7 +901,11 @@
 
 /* Overridden by targets/sf32lb52 (defined by @apache-mynewt-nimble/nimble/host) */
 #ifndef MYNEWT_VAL_BLE_SM_LVL
-#define MYNEWT_VAL_BLE_SM_LVL (4)
+/* Just Works pairing: must be 2 (encrypted, unauthenticated) to match
+ * IO_CAP=NO_INPUT_OUTPUT / MITM=0 / SC_ONLY=0. LVL>=3 demands MITM, so the watch
+ * would reject the Mac's unauthenticated pair with BLE_SM_ERR_AUTHREQ
+ * (ble_sm.c:1760) and the link would stall at connectivity 0x11 (never pairs). */
+#define MYNEWT_VAL_BLE_SM_LVL (2)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_SM_MAX_PROCS

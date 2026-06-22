@@ -3,11 +3,17 @@
 
 syscfg.vals:
     BLE_TRANSPORT_LL: socket
-    BLE_SM_IO_CAP: 'BLE_HS_IO_DISPLAY_YESNO'
-    BLE_SM_SC_ONLY: 1
+    # Just Works pairing (no manual accept / no re-pair treadmill). These must
+    # stay internally consistent: NO_INPUT_OUTPUT + MITM=0 + SC_ONLY=0 require
+    # LVL=2 (encrypted, unauthenticated). LVL>=3 would demand MITM and the watch
+    # would reject the unauthenticated pair, stalling at connectivity 0x11.
+    # NOTE: the compiled values live in port/include/sf32lb52/syscfg/syscfg.h;
+    # this file is kept in sync for clarity but is not consumed by the waf build.
+    BLE_SM_IO_CAP: 'BLE_HS_IO_NO_INPUT_OUTPUT'
+    BLE_SM_SC_ONLY: 0
     BLE_SM_LEGACY: 0
-    BLE_SM_MITM: 1
-    BLE_SM_LVL: 4
+    BLE_SM_MITM: 0
+    BLE_SM_LVL: 2
     # Increased to prevent ACL mbuf allocation failures during high-throughput
     # operations (e.g. FW upgrade over BLE on iOS).
     BLE_TRANSPORT_ACL_COUNT: 60
