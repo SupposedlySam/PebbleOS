@@ -24,18 +24,15 @@
 
 static uint32_t s_read_offset;
 
-/* {0000c0de-0000-1000-8000-00805f9b34fb} */
-static const ble_uuid128_t s_svc_uuid =
-    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-                     0x00, 0x10, 0x00, 0x00, 0xde, 0xc0, 0x00, 0x00);
-/* {0000c0d1-0000-1000-8000-00805f9b34fb} : control (write offset) */
-static const ble_uuid128_t s_ctrl_uuid =
-    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-                     0x00, 0x10, 0x00, 0x00, 0xd1, 0xc0, 0x00, 0x00);
-/* {0000c0d2-0000-1000-8000-00805f9b34fb} : data (read) */
-static const ble_uuid128_t s_data_uuid =
-    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-                     0x00, 0x10, 0x00, 0x00, 0xd2, 0xc0, 0x00, 0x00);
+// 16-bit UUIDs (0xc0de/0xc0d1/0xc0d2), expanded via the SIG base. A 128-bit *service*
+// UUID failed inside ble_gatts_start() on obelix and bricked the HCPU on boot; 16-bit
+// matches the working fed9 service. Bleak readers using the full base form still match.
+/* 0000c0de-... */
+static const ble_uuid16_t s_svc_uuid = BLE_UUID16_INIT(0xc0de);
+/* 0000c0d1-... : control (write offset) */
+static const ble_uuid16_t s_ctrl_uuid = BLE_UUID16_INIT(0xc0d1);
+/* 0000c0d2-... : data (read) */
+static const ble_uuid16_t s_data_uuid = BLE_UUID16_INIT(0xc0d2);
 
 static int prv_ctrl_access(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg) {

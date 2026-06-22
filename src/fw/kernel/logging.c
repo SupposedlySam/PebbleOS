@@ -13,6 +13,7 @@
 #include "debug/advanced_logging.h"
 #include "drivers/rtc.h"
 #include "system/logging.h"
+#include "system/log_ring.h"
 
 #include "mcu/interrupts.h"
 #include "mcu/privilege.h"
@@ -112,6 +113,14 @@ static void prv_log_serial(
 #endif // CONFIG_PULSE_EVERYWHERE
 
 void kernel_pbl_log_serial(LogBinaryMessage *log_message, bool async) {
+  // Always capture into the RAM log ring (plain-GATT observability via the debug log
+  // service), even when interactive serial-console logging is disabled. Phone-free
+  // dev never puts the console in the LOGGING state, so prv_check_serial_log_enabled()
+  // would otherwise drop every line and the ring would stay empty. This is the only
+  // always-on observability path on the watch.
+  log_ring_append(log_message->message);
+  log_ring_append("\r\n");
+
   if (!prv_check_serial_log_enabled(log_message->log_level)) {
     return;
   }
