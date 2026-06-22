@@ -117,6 +117,23 @@ static void prv_handle_connection_event(struct ble_gap_event *event) {
   s_pairing_in_progress = false;
 
   bt_driver_handle_le_connection_complete_event(&complete_event);
+
+  // Bonded reconnect: the controller can restore link encryption during connection
+  // setup, so NimBLE delivers NO separate BLE_GAP_EVENT_ENC_CHANGE. Without it, the
+  // kernel LE clients never receive the "connected & encrypted" event that (re)starts
+  // GATT discovery + PPoGATT -- so plain GATT reads work but the console/daemon never
+  // re-establishes (the "bonded-reconnect gremlin"). A fresh pair always emits a real
+  // ENC_CHANGE, which is why pairing works but reconnecting did not. Synthesize the
+  // encryption-change here when the link comes up already encrypted; the downstream
+  // handler is idempotent (a later real ENC_CHANGE no-ops as "refreshed").
+  if (desc.sec_state.encrypted) {
+    struct BleEncryptionChange enc_change_event = {
+        .encryption_enabled = true,
+        .status = HciStatusCode_Success,
+    };
+    nimble_addr_to_pebble_addr(&desc.peer_id_addr, &enc_change_event.dev_address);
+    bt_driver_handle_le_encryption_change_event(&enc_change_event);
+  }
 }
 
 static void prv_handle_disconnection_event(struct ble_gap_event *event) {
