@@ -224,6 +224,18 @@ void bt_ctl_init(void) {
   s_comm_state_change_mutex = mutex_create();
 
   s_comm_airplane_mode_on = bt_persistent_storage_get_airplane_mode_enabled();
+#if defined(CONFIG_DEV_FORCE_BT_ON)
+  // Dev loop guarantee: never strand the phone-free BLE path behind airplane
+  // mode. Once the radio is off the persisted pref can't be cleared over BLE
+  // (the stack GATT-connects but the PPoG handshake fails), so clear it at boot
+  // and bring the radio up. Detected host-side by pebble_status as the
+  // "GATT connects, PPoG handshake fails" signature.
+  if (s_comm_airplane_mode_on) {
+    PBL_LOG_INFO("DEV_FORCE_BT_ON: clearing persisted airplane mode at boot");
+    s_comm_airplane_mode_on = false;
+    bt_persistent_storage_set_airplane_mode_enabled(false);
+  }
+#endif
   s_comm_initialized = true;
 
   gatt_client_subscription_boot();

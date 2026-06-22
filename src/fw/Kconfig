@@ -59,6 +59,18 @@ config DART_RUNTIME
       apps authored in Dart/Flutter run natively on the watch (no phone,
       no JS). The wasm heap lives in PSRAM. Zero impact when disabled.
 
+config DEV_FORCE_BT_ON
+    bool "Force Bluetooth radio ON at boot (dev loop)"
+    default DART_RUNTIME
+    help
+      On boot, clear any persisted airplane-mode preference and force the
+      Bluetooth radio on. Our phone-free dev loop drives the watch entirely
+      over BLE; if a build boots into airplane mode the stack still
+      GATT-connects but the PPoG handshake fails, and there is no way to
+      toggle the radio back on over BLE (the radio is the thing that is off).
+      This guarantees every dev boot comes up reachable. Dev builds only --
+      never enable for a release/shipping build.
+
 config MMAP_RESOURCES
     bool "Memory-mapped (zero-copy) resource reads"
     help
