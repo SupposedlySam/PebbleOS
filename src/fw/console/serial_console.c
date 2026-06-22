@@ -13,6 +13,7 @@
 #include "drivers/watchdog.h"
 #include "kernel/util/stop.h"
 #include "os/tick.h"
+#include "system/log_ring.h"
 #include "system/logging.h"
 #include "system/passert.h"
 
@@ -69,6 +70,9 @@ void serial_console_enable_prompt(void) {
 }
 
 void serial_console_write_log_message(const char* msg) {
+  // Capture every log line into the RAM ring so it can be pulled over plain GATT
+  // (debug log service) even with no PPoG/console session -- full observability.
+  log_ring_append(msg);
   while (*msg) {
     dbgserial_putchar(*(msg++));
   }

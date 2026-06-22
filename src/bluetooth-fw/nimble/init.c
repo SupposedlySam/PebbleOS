@@ -28,6 +28,7 @@ PBL_LOG_MODULE_DEFINE(bt, CONFIG_BT_LOG_LEVEL);
 static const uint32_t s_bt_stack_start_stop_timeout_ms = 10000;
 
 extern void pebble_pairing_service_init(void);
+extern void debug_log_service_init(void);
 extern void nimble_discover_init(void);
 
 #if NIMBLE_CFG_CONTROLLER
@@ -144,6 +145,7 @@ bool bt_driver_start(BTDriverConfig *config) {
   ble_svc_gatt_init();
   ble_svc_dis_init();
   pebble_pairing_service_init();
+  debug_log_service_init();
   ble_svc_bas_init();
 
 #ifdef CONFIG_GH3X2X_TUNING_SERVICE_ENABLED
