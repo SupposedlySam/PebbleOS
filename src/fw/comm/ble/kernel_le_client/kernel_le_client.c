@@ -431,7 +431,7 @@ log_error:
 extern BTErrno gatt_client_discovery_rediscover_all(const BTDeviceInternal *device);
 
 static void prv_handle_connection_event(const PebbleBLEConnectionEvent *event) {
-  PBL_LOG(LOG_LEVEL_INFO, "PEBBLE_BLE_CONNECTION_EVENT: reason=0x%x, conn=%u, bond=%u",
+  PBL_LOG_INFO("PEBBLE_BLE_CONNECTION_EVENT: reason=0x%x, conn=%u, bond=%u",
           event->hci_reason, event->connected, event->bonding_id);
 
   const bool connected = event->connected;

@@ -441,11 +441,11 @@ BTErrno gatt_client_discovery_discover_all(const BTDeviceInternal *device) {
     }
     if (connection->gatt_remote_services) {
       // Already discovered, no need to do it again!
-      PBL_LOG(LOG_LEVEL_INFO, "gatt discover_all: REUSING cached services (no fresh discovery)");
+      PBL_LOG_INFO("gatt discover_all: REUSING cached services (no fresh discovery)");
       prv_send_services_added_event(connection, BTErrnoOK);
       goto unlock;
     }
-    PBL_LOG(LOG_LEVEL_INFO, "gatt discover_all: starting fresh discovery");
+    PBL_LOG_INFO("gatt discover_all: starting fresh discovery");
     conn_mgr_set_ble_conn_response_time(connection, BtConsumerLeServiceDiscovery,
                                         ResponseTimeMin, 30);
     prv_add_discovery_job(connection, NULL);
