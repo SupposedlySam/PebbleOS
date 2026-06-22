@@ -6,7 +6,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define LOG_RING_SIZE 8192u
+// SRAM on obelix is extremely tight (~14-22KB boot headroom). 8KB here ate the
+// boot stack/heap headroom and bricked the HCPU (LCPU kept advertising). Keep this
+// SMALL -- 1KB captures the recent reconnect/diagnostic lines, which is all we need.
+#define LOG_RING_SIZE 1024u
 
 static char s_buf[LOG_RING_SIZE];
 static volatile uint32_t s_head;   // next write index
