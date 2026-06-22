@@ -887,7 +887,7 @@
 
 /* Overridden by targets/sf32lb52 (defined by @apache-mynewt-nimble/nimble/host) */
 #ifndef MYNEWT_VAL_BLE_SM_IO_CAP
-#define MYNEWT_VAL_BLE_SM_IO_CAP (BLE_HS_IO_DISPLAY_YESNO)
+#define MYNEWT_VAL_BLE_SM_IO_CAP (BLE_HS_IO_NO_INPUT_OUTPUT)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_SM_KEYPRESS
@@ -910,7 +910,7 @@
 
 /* Overridden by targets/sf32lb52 (defined by @apache-mynewt-nimble/nimble/host) */
 #ifndef MYNEWT_VAL_BLE_SM_MITM
-#define MYNEWT_VAL_BLE_SM_MITM (1)
+#define MYNEWT_VAL_BLE_SM_MITM (0)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_SM_OOB_DATA_FLAG
@@ -933,7 +933,7 @@
 
 /* Overridden by targets/sf32lb52 (defined by @apache-mynewt-nimble/nimble/host) */
 #ifndef MYNEWT_VAL_BLE_SM_SC_ONLY
-#define MYNEWT_VAL_BLE_SM_SC_ONLY (1)
+#define MYNEWT_VAL_BLE_SM_SC_ONLY (0)
 #endif
 
 /* Overridden by app (defined by @apache-mynewt-nimble/nimble/host) */
