@@ -1,4 +1,8 @@
-excludes = []
+# debug_log_service.c registers a 128-bit-UUID GATT service that fails inside
+# ble_gatts_start() on obelix -> ble_hs never syncs -> NimBLE host start times out
+# -> PBL_CROAK bricks the HCPU on boot. The log ring is read via a console command
+# ("log ring") instead, so this service is excluded from the build.
+excludes = ['debug_log_service.c']
 if not bld.env.CONFIG_GH3X2X_TUNING_SERVICE_ENABLED:
     excludes.extend(['gh3x2x_tuning_service.c'])
 

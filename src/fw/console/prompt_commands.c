@@ -32,6 +32,7 @@
 #include "syscall/syscall.h"
 #include "system/bootbits.h"
 #include "system/hexdump.h"
+#include "system/log_ring.h"
 #include "system/logging.h"
 #include "system/passert.h"
 #include "system/reboot_reason.h"
@@ -82,6 +83,25 @@ extern void command_read_word(const char* address_str) {
 
 void command_format_flash(void) {
   flash_erase_bulk();
+}
+
+// Dumps the in-RAM firmware log ring over the console. Captures history from
+// before the console attached (e.g. a failed bonded reconnect) since the ring
+// persists across BLE session drops without a reboot.
+void command_log_ring_dump(void) {
+  uint32_t count = log_ring_count();
+  char buf[129];
+  uint32_t offset = 0;
+  while (offset < count) {
+    uint32_t n = log_ring_read(offset, (uint8_t *)buf, sizeof(buf) - 1);
+    if (n == 0) {
+      break;
+    }
+    buf[n] = '\0';
+    prompt_send_response(buf);
+    offset += n;
+  }
+  prompt_send_response_fmt(buf, sizeof(buf), "--- log ring: %"PRIu32" bytes ---", count);
 }
 
 void command_erase_flash(const char *address_str, const char *length_str) {
