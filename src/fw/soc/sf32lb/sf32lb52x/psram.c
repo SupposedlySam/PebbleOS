@@ -169,9 +169,38 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     return;
   }
 
-  // Init reports HAL_OK but the FIRST HYPERBUS read transaction hangs KernelBG (no
-  // reboot). Mark each read so the last line received pins the exact culprit.
-  emit("psram step: HAL_HYPER_PSRAM_ReadID");
+  // The register reads (ReadID/ReadCR) spin on TCF with NO timeout and HANG the watch
+  // (the read strobe never completes). The MEMORY-MAPPED SBUS read is bounded by the
+  // MPI WDTR (armed in init), so it returns garbage instead of hanging -- do it FIRST
+  // to capture the read-back PATTERN (the partition-the-failure data) before the
+  // hang-prone register reads. Per-line shipping delivers these even if the watch later
+  // wedges on ReadID.
+  //  word0 reads word1's value -> read latency shift; a bit-permutation of what we wrote
+  //  -> pinmux/data-lane order; unrelated noise -> power/mode/strobe.
+  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;  // SBUS (WDTR-bounded)
+  p0[0] = 0xA5A50000u;
+  p0[1] = 0x0000A5A5u;
+  __DSB();
+  emit("psram step: SBUS read-back");
+  sniprintf(buf, sizeof(buf), "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
+            (unsigned)p0[0], (unsigned)p0[1]);
+  emit(buf);
+
+  emit("psram step: SBUS 256-word test");
+  uint32_t fail = 0;
+  int n = prv_psram_test(256, &fail);
+  if (n < 0) {
+    sniprintf(buf, sizeof(buf), "psram test FAIL at word %u", (unsigned)fail);
+  } else {
+    s_psram_ready = true;
+    sniprintf(buf, sizeof(buf), "psram test OK (%d words @0x%08x) - %u MB ready",
+              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
+  }
+  emit(buf);
+
+  // Register reads LAST -- these can hang (unbounded TCF spin). We already have the
+  // SBUS pattern above. Marked so we know if they're the wedge point.
+  emit("psram step: HAL_HYPER_PSRAM_ReadID (may hang)");
   uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
   emit("psram step: HAL_HYPER_PSRAM_ReadCR");
   uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
@@ -182,26 +211,6 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
             (unsigned)id, (unsigned)cr0, (unsigned)qclk, (unsigned)(qclk / 2u),
             (unsigned)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU),
             (int)HAL_RCC_HCPU_GetCurrentDvfsMode());
-  emit(buf);
-
-  // SBUS uncached only -- the cached CBUS alias hard-faults if the path is bad.
-  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;
-  p0[0] = 0xA5A50000u;
-  p0[1] = 0x0000A5A5u;
-  __DSB();
-  sniprintf(buf, sizeof(buf), "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
-            (unsigned)p0[0], (unsigned)p0[1]);
-  emit(buf);
-
-  uint32_t fail = 0;
-  int n = prv_psram_test(256, &fail);
-  if (n < 0) {
-    sniprintf(buf, sizeof(buf), "psram test FAIL at word %u", (unsigned)fail);
-  } else {
-    s_psram_ready = true;
-    sniprintf(buf, sizeof(buf), "psram test OK (%d words @0x%08x) - %u MB ready",
-              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
-  }
   emit(buf);
 }
 
