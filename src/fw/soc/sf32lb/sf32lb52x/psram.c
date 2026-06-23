@@ -60,10 +60,15 @@ static void prv_restore_pinmux(void) {
   HAL_PIN_Set_Analog(PAD_SA06, 1);  // CLKB unused on Winbond HYPERBUS
 }
 
+typedef void (*PsramEmitFn)(const char *line);
+
 //! Bring up the MPI1 PSRAM controller exactly ONCE. Idempotent: later calls return
 //! the cached result without touching the clock/controller (re-init hangs the watch).
 //! div = MPI1 clock divider (canonical = 2 -> DLL2 288 MHz / 2 = 144 MHz).
-static HAL_StatusTypeDef prv_psram_init(uint16_t div) {
+//! Emits a step marker BEFORE each HAL call so that, with per-line console shipping,
+//! the LAST line received pinpoints exactly which step hangs/faults (the bring-up has
+//! been crashing/hanging the watch; we need to know where).
+static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   if (s_psram_inited) {
     return s_psram_init_res;
   }
@@ -71,18 +76,23 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div) {
   // PSRAM is powered by VDD_SiP, not the internal 1.8 V LDO18 (init.c disables LDO18
   // for exactly this reason). Do NOT enable LDO18 -- it fights the external SiP rail
   // and corrupts reads. Just un-park the pins and clock the controller.
+  emit("psram step: restore pinmux");
   prv_restore_pinmux();
 
   // MPI1 (FLASH1) off DLL2 @ 288 MHz; div 2 -> 144 MHz, per the SiFli board_init_psram
   // path. Reference enables DLL2 at 240 THEN 288 (two-step lock) -- replicate it; a
   // single EnableDLL2(288) may not lock. Done once -- re-selecting the clock hangs.
+  emit("psram step: EnableDLL2(240)");
   HAL_RCC_HCPU_EnableDLL2(240000000);
+  emit("psram step: EnableDLL2(288)");
   HAL_RCC_HCPU_EnableDLL2(288000000);
+  emit("psram step: ClockSelect FLASH1<-DLL2");
   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
 
   // Feed the KernelBG watchdog: controller init can be slow.
   prompt_watchdog_feed();
 
+  emit("psram step: read PID");
   s_psram_pid = (hwp_hpsys_cfg->IDR & HPSYS_CFG_IDR_PID_Msk) >> HPSYS_CFG_IDR_PID_Pos;
   s_psram_pid &= 7;
 
@@ -102,8 +112,10 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div) {
 
   // memset zeroes handle.wakeup = 0 (normal, non-standby boot), per the canonical init.
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
+  emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
   s_psram_inited = true;
+  emit("psram step: init returned");
   return s_psram_init_res;
 }
 
@@ -129,11 +141,8 @@ static int prv_psram_test(int words, uint32_t *fail_idx) {
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
-//! Sink for one diagnostic line. Two impls: the console (`psram` command) and the
-//! firmware log ring (boot self-test, readable over plain GATT). Keeps the bring-up +
-//! diagnostic body in ONE place (prv_psram_diag) instead of duplicated per output path.
-typedef void (*PsramEmitFn)(const char *line);
-
+//! Sink for one diagnostic line (console `psram` command). PsramEmitFn is declared
+//! above prv_psram_init so the bring-up can emit per-step markers via the same sink.
 static void prv_emit_console(const char *line) { prompt_send_response(line); }
 
 //! Bring the controller up ONCE (idempotent + crash-safe to re-run; re-init would
@@ -148,7 +157,7 @@ static void prv_emit_console(const char *line) { prompt_send_response(line); }
 static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   char buf[160];
 
-  HAL_StatusTypeDef res = prv_psram_init(div);
+  HAL_StatusTypeDef res = prv_psram_init(div, emit);
   sniprintf(buf, sizeof(buf), "psram init div=%u pid=%u -> %s", (unsigned)div,
             (unsigned)s_psram_pid, res == HAL_OK ? "HAL_OK" : "HAL_ERR");
   emit(buf);
