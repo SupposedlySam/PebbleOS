@@ -148,12 +148,12 @@ static void prv_emit_console(const char *line) { prompt_send_response(line); }
 //! Bring the controller up ONCE (idempotent + crash-safe to re-run; re-init would
 //! hang), run the partition-the-failure diagnostic + a write/read test, and emit each
 //! line via `emit`. Sets s_psram_ready on a passing test. The HBPSRAM path auto-
-//! calibrates the SCK/DQS read tap from HCLK/DVFS state, so we read back chip ID + CR0
-//! + the ACTUAL calibrated clock to tell power/mode/timing/pinmux apart:
-//!   garbage id -> chip not talking (power/reset/mode); good id, bad cr0 -> HYPERBUS
-//!   latency not applied; qclk/2 != 144M -> wrong calibration bucket. The w0 read-back
-//!   uses distinct per-word values: word0==word1's value -> latency shift; a
-//!   bit-permutation -> pinmux/data-lane order; unrelated noise -> power/mode.
+//! calibrates the SCK/DQS read tap from HCLK/DVFS state; when that tap is wrong the
+//! reads come back corrupted. We DON'T touch the chip's HYPERBUS register reads here
+//! (they hang -- see below); the WDTR-bounded SBUS w0 read-back uses distinct per-word
+//! values to tell the failure modes apart:
+//!   word0 == word1's value -> read latency shift; a bit-permutation of what we wrote
+//!   -> pinmux/data-lane order; unrelated noise -> power/mode/strobe; correct -> ready.
 static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   char buf[160];
 
@@ -198,20 +198,12 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   }
   emit(buf);
 
-  // Register reads LAST -- these can hang (unbounded TCF spin). We already have the
-  // SBUS pattern above. Marked so we know if they're the wedge point.
-  emit("psram step: HAL_HYPER_PSRAM_ReadID (may hang)");
-  uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
-  emit("psram step: HAL_HYPER_PSRAM_ReadCR");
-  uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
-  emit("psram step: HAL_QSPI_GET_CLK");
-  uint32_t qclk = HAL_QSPI_GET_CLK(&s_psram_handle);
-  sniprintf(buf, sizeof(buf),
-            "psram diag: id=0x%04x cr0=0x%04x qclk=%u/2=%u hclk=%u dvfs=%d",
-            (unsigned)id, (unsigned)cr0, (unsigned)qclk, (unsigned)(qclk / 2u),
-            (unsigned)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU),
-            (int)HAL_RCC_HCPU_GetCurrentDvfsMode());
-  emit(buf);
+  // NOTE: the HYPERBUS register reads (HAL_HYPER_PSRAM_ReadID/ReadCR) are deliberately
+  // NOT called here -- they spin on TCF with no timeout and HANG KernelBG forever (the
+  // read strobe never completes), wedging the console and forcing a reboot every run.
+  // The SBUS read-back + test above is WDTR-bounded (returns garbage, never hangs) and
+  // gives us the partition-the-failure pattern. Restore the register reads only once the
+  // read path is fixed (bounded reads + a working SCK/DQS tap).
 }
 
 //! Console command: `psram [div]` (default div=2). Output goes to the console.
