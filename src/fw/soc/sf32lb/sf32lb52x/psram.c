@@ -8,19 +8,32 @@
 //! MPI1 controller so it can back the Dart/WAMR pool, driven by the `psram`
 //! console command (not auto-run at boot).
 //!
-//! Mirrors the SiFli SF32LB52 reference exactly (OpenSiFli/SiFli-SDK
+//! Mirrors the SiFli SF32LB52 reference (OpenSiFli/SiFli-SDK
 //! customer/boards/.../bsp_init.c board_init_psram + common/flash.c
 //! bsp_psramc_init): clock MPI1 (FLASH1) off DLL2 @ 288 MHz / div 2 = 144 MHz,
-//! then HAL_MPI_PSRAM_Init(handle, cfg, div) with wakeup=0. No manual DQS /
-//! calibration -- the HAL handles HBPSRAM internally; the earlier DQS sweep was a
-//! dead end. KEY: do NOT enable LDO18 (it fights the external VDD_SiP rail and
-//! corrupts reads), and bring the controller up exactly ONCE (re-selecting the
-//! DLL2 clock while MPI1 is live HANGS/resets the watch).
+//! then HAL_MPI_PSRAM_Init(handle, cfg, div) with wakeup=0.
+//!
+//! READ-STROBE FIX (2026-06-23): HAL_MPI_PSRAM_Init's internal auto-calibration
+//! (HYPER->OPI->HAL_MPI_OPSRAM_CAL_DELAY) leaves an OFF-CENTER SCK/DQS read tap, so
+//! the first real read hangs (the controller spins on the transfer-complete flag with
+//! no timeout). Web + HAL research (HyperRAM DQS tuning is the classic failure) says
+//! the fix is an EXHAUSTIVE tap sweep -> use the CENTER of the widest passing window.
+//! prv_psram_tap_sweep() does exactly that, AFTER init, using the WDTR-bounded SBUS
+//! reads (which return garbage instead of hanging) -- unlike the earlier abandoned
+//! sweep, which used the UNBOUNDED register reads and wedged (so it looked like a dead
+//! end). We also bounded the HAL's CAL_DELAY spin (bf0_hal_mpi_psram.c) so init itself
+//! can no longer wedge KernelBG.
+//!
+//! KEY: do NOT enable LDO18 (it fights the external VDD_SiP rail and corrupts reads),
+//! and bring the controller up exactly ONCE (re-selecting the DLL2 clock while MPI1 is
+//! live HANGS/resets the watch).
 
 #include <bf0_hal.h>
 
 #include "console/prompt.h"
 #include "system/logging.h"
+
+#include "psram_tapwindow.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -139,6 +152,77 @@ static int prv_psram_test(int words, uint32_t *fail_idx) {
   return words;
 }
 
+//! Exhaustive read-strobe tap sweep. The HAL auto-cal leaves an off-center SCK/DQS tap
+//! (so reads hang/corrupt); re-derive the right one empirically. For each SCK candidate,
+//! sweep the full DQS range writing a TAP-UNIQUE marker and reading it back (the SBUS
+//! path is WDTR-bounded -- a bad tap returns garbage, it never hangs), build a pass map,
+//! and pick the CENTER of the widest passing window (psram_pick_tap_center). Leaves the
+//! best (SCK,DQS) applied. Returns the chosen DQS tap, or -1 if nothing reads back.
+//! Tap-unique markers prevent a stale-latch false pass (a bad read returning the prior
+//! tap's data). Must run AFTER HAL_MPI_PSRAM_Init (it arms the WDTR + leaves the
+//! controller up); feeds the KernelBG watchdog across the sweep.
+#define PSRAM_TAP_MAX 256
+static int prv_psram_tap_sweep(PsramEmitFn emit) {
+  char buf[160];
+  volatile uint32_t *p = (volatile uint32_t *)PSRAM_TEST_BASE;
+  static unsigned char pass[PSRAM_TAP_MAX];
+  // SCK candidates: low delays cover the usable range at 144MHz; the auto-cal's own
+  // value is typically small. (DQS is the dominant read-strobe knob; SCK is the outer
+  // loop.) 0 last so a nonzero delay is preferred on a width tie.
+  static const uint8_t sck_cands[] = {1, 2, 3, 4, 5, 6, 8, 0};
+  int best_sck = -1, best_lo = -1, best_hi = -1, best_center = -1, best_w = -1;
+
+  for (unsigned si = 0; si < sizeof(sck_cands); si++) {
+    uint8_t sck = sck_cands[si];
+    HAL_MPI_SET_SCK(&s_psram_handle, sck, 0);
+    for (int dqs = 0; dqs < PSRAM_TAP_MAX; dqs++) {
+      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
+      HAL_Delay_us(10);  // strobe settle (HAL uses 50us after a final apply)
+      __DSB();
+      uint32_t marker = 0xC0DE0000u ^ ((uint32_t)sck << 12) ^ ((uint32_t)dqs << 4);
+      bool ok = true;
+      for (int i = 0; i < 8; i++) {
+        p[i] = marker + (uint32_t)i;
+      }
+      __DSB();
+      for (int i = 0; i < 8 && ok; i++) {
+        ok = (p[i] == marker + (uint32_t)i);
+      }
+      pass[dqs] = ok ? 1u : 0u;
+      if ((dqs & 0x1f) == 0) {
+        prompt_watchdog_feed();
+      }
+    }
+    int lo = -1, hi = -1;
+    int center = psram_pick_tap_center(pass, PSRAM_TAP_MAX, &lo, &hi);
+    int width = (center < 0) ? -1 : (hi - lo);
+    sniprintf(buf, sizeof(buf), "psram sweep: sck=%u dqs window=[%d..%d] w=%d",
+              (unsigned)sck, lo, hi, width);
+    emit(buf);
+    if (center >= 0 && width > best_w) {
+      best_w = width;
+      best_sck = sck;
+      best_lo = lo;
+      best_hi = hi;
+      best_center = center;
+    }
+    prompt_watchdog_feed();
+  }
+
+  if (best_center < 0) {
+    emit("psram sweep: NO passing tap at any sck/dqs (not a tap problem -> power/pinmux/latency)");
+    return -1;
+  }
+  HAL_MPI_SET_SCK(&s_psram_handle, (uint8_t)best_sck, 0);
+  HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)best_center);
+  HAL_Delay_us(50);
+  __DSB();
+  sniprintf(buf, sizeof(buf), "psram sweep: CHOSE sck=%d dqs=%d window=[%d..%d] w=%d",
+            best_sck, best_center, best_lo, best_hi, best_w);
+  emit(buf);
+  return best_center;
+}
+
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
 //! Sink for one diagnostic line (console `psram` command). PsramEmitFn is declared
@@ -169,14 +253,16 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     return;
   }
 
-  // The register reads (ReadID/ReadCR) spin on TCF with NO timeout and HANG the watch
-  // (the read strobe never completes). The MEMORY-MAPPED SBUS read is bounded by the
-  // MPI WDTR (armed in init), so it returns garbage instead of hanging -- do it FIRST
-  // to capture the read-back PATTERN (the partition-the-failure data) before the
-  // hang-prone register reads. Per-line shipping delivers these even if the watch later
-  // wedges on ReadID.
+  // THE FIX: re-derive the read strobe. The HAL auto-cal left an off-center SCK/DQS tap;
+  // sweep for the center of the widest passing window and apply it (WDTR-bounded reads,
+  // can't hang). After this the SBUS read-back below should be correct.
+  emit("psram step: tap sweep");
+  prv_psram_tap_sweep(emit);
+
+  // SBUS read-back PATTERN (post-sweep). MEMORY-MAPPED SBUS read is bounded by the MPI
+  // WDTR (armed in init), so it returns garbage instead of hanging.
   //  word0 reads word1's value -> read latency shift; a bit-permutation of what we wrote
-  //  -> pinmux/data-lane order; unrelated noise -> power/mode/strobe.
+  //  -> pinmux/data-lane order; unrelated noise -> power/mode/strobe; correct -> fixed.
   volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;  // SBUS (WDTR-bounded)
   p0[0] = 0xA5A50000u;
   p0[1] = 0x0000A5A5u;

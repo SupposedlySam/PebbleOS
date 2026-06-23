@@ -1,0 +1,25 @@
+diff --git a/drivers/hal/bf0_hal_mpi_psram.c b/drivers/hal/bf0_hal_mpi_psram.c
+index 7d49cdaa..8bfd6ff5 100644
+--- a/drivers/hal/bf0_hal_mpi_psram.c
++++ b/drivers/hal/bf0_hal_mpi_psram.c
+@@ -1174,7 +1174,19 @@ static int HAL_MPI_OPSRAM_CAL_DELAY(FLASH_HandleTypeDef *hflash, uint8_t *sck, u
+     //HAL_Delay_us(20);  // add delay to avoid CDC during cal_done polling
+     HAL_Delay_us_psram(0);
+     HAL_Delay_us_psram(20);
+-    while (!(hflash->Instance->CALCR & MPI_CALCR_DONE_Msk));
++    /* PEBBLE: bound this spin. The original `while(!(CALCR & DONE));` has NO timeout, so
++     * if the calibration DONE bit never asserts (wrong read strobe / non-responding
++     * part) it wedges KernelBG forever -> watchdog reboot loop. Cap it; on timeout we
++     * fall through with whatever DELAY holds (the caller's off-center tap is overridden
++     * by psram.c's explicit tap sweep anyway). ~a few ms at 240MHz. */
++    {
++        volatile uint32_t guard = 4000000u;
++        while (!(hflash->Instance->CALCR & MPI_CALCR_DONE_Msk)) {
++            if (--guard == 0) {
++                break;
++            }
++        }
++    }
+     delay = hflash->Instance->CALCR & MPI_CALCR_DELAY_Msk;
+     hflash->Instance->CALCR &= ~MPI_CALCR_EN;
+ 
