@@ -169,8 +169,13 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     return;
   }
 
+  // Init reports HAL_OK but the FIRST HYPERBUS read transaction hangs KernelBG (no
+  // reboot). Mark each read so the last line received pins the exact culprit.
+  emit("psram step: HAL_HYPER_PSRAM_ReadID");
   uint16_t id = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+  emit("psram step: HAL_HYPER_PSRAM_ReadCR");
   uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+  emit("psram step: HAL_QSPI_GET_CLK");
   uint32_t qclk = HAL_QSPI_GET_CLK(&s_psram_handle);
   sniprintf(buf, sizeof(buf),
             "psram diag: id=0x%04x cr0=0x%04x qclk=%u/2=%u hclk=%u dvfs=%d",
