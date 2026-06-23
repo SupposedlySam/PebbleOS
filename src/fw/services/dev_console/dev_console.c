@@ -40,8 +40,15 @@ static char s_resp[DEV_CONSOLE_RESP_MAX];
 static size_t s_resp_len;
 static PromptContext s_ctx;
 
-//! Each prompt response line is appended (newline-terminated) to the reply.
+static void prv_ship_applog(const char *str);
+
+//! Each prompt response line is shipped IMMEDIATELY (app-log) as it is emitted, so a
+//! command that hard-faults mid-run -- e.g. a PSRAM bring-up that faults on a bad data
+//! path and reboots the watch -- still delivers the lines it printed before the crash
+//! (the whole partition-the-failure diagnostic we need). We also accumulate the lines
+//! for the 0x4000 direct/QEMU reply sent on completion.
 static void prv_response_cb(const char *response) {
+  prv_ship_applog(response);
   size_t n = strlen(response);
   if (s_resp_len + n + 1 < DEV_CONSOLE_RESP_MAX) {
     memcpy(s_resp + s_resp_len, response, n);
@@ -83,20 +90,15 @@ static void prv_complete_cb(void) {
   }
   if (s_resp_len == 0) {
     static const char kOk[] = "(ok)\n";
+    prv_ship_applog("(ok)");  // per-line path shipped nothing; ship the ack
     memcpy(s_resp, kOk, sizeof(kOk) - 1);
     s_resp_len = sizeof(kOk) - 1;
   }
-  // 0x4000 reply (direct/QEMU).
+  // 0x4000 reply (direct/QEMU). The app-log copy was already shipped per-line in
+  // prv_response_cb as each line was emitted, so partial output survives a crash and
+  // there is no need to re-ship the whole buffer here.
   comm_session_send_data(s_session, DEV_CONSOLE_ENDPOINT, (uint8_t *)s_resp,
                          s_resp_len, COMM_SESSION_DEFAULT_TIMEOUT);
-  // App-log copy (relay-reachable), chunked to fit a single app-log message.
-  for (size_t i = 0; i < s_resp_len; i += APPLOG_CHUNK) {
-    char tmp[APPLOG_CHUNK + 1];
-    size_t n = (s_resp_len - i < APPLOG_CHUNK) ? (s_resp_len - i) : APPLOG_CHUNK;
-    memcpy(tmp, s_resp + i, n);
-    tmp[n] = '\0';
-    prv_ship_applog(tmp);
-  }
   s_session = NULL;
 }
 
