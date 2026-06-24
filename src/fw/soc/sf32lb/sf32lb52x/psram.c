@@ -302,6 +302,43 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   }
   emit(buf);
 
+  // RANGE CHARACTERIZATION: the 256-word test only proves the first 1KB. The Dart heap pool
+  // needs MBs, and a 67KB malloc from an 8MB pool FAILED -- so probe the WHOLE configured
+  // region (unique value every 64KB, write-all then read-all) to find the first failing
+  // address. Tells us the real usable size / aliasing vs an allocator issue. SBUS is
+  // WDTR-bounded so bad regions return garbage, not faults.
+  {
+    volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
+    const uint32_t total_words = (PSRAM_MSIZE_MB * 1024u * 1024u) / 4u;
+    const uint32_t stride = (64u * 1024u) / 4u;  // one probe per 64KB
+    for (uint32_t off = 0; off < total_words; off += stride) {
+      base[off] = 0xBEEF0000u ^ off;
+    }
+    __DSB();
+    uint32_t fail_off = 0xFFFFFFFFu, points = 0, ok = 0;
+    for (uint32_t off = 0; off < total_words; off += stride) {
+      points++;
+      if (base[off] == (0xBEEF0000u ^ off)) {
+        ok++;
+      } else if (fail_off == 0xFFFFFFFFu) {
+        fail_off = off;
+      }
+      if ((points & 0x3fu) == 0u) {
+        prompt_watchdog_feed();
+      }
+    }
+    if (fail_off != 0xFFFFFFFFu) {
+      sniprintf(buf, sizeof(buf),
+                "psram RANGE: first FAIL @ %u KB; %u/%u 64KB-points OK across %u MB",
+                (unsigned)((fail_off * 4u) / 1024u), (unsigned)ok, (unsigned)points,
+                PSRAM_MSIZE_MB);
+    } else {
+      sniprintf(buf, sizeof(buf), "psram RANGE: ALL %u 64KB-points OK across %u MB",
+                (unsigned)points, PSRAM_MSIZE_MB);
+    }
+    emit(buf);
+  }
+
   // NOTE: the HYPERBUS register reads (HAL_HYPER_PSRAM_ReadID/ReadCR) are deliberately
   // NOT called here -- they spin on TCF with no timeout and HANG KernelBG forever (the
   // read strobe never completes), wedging the console and forcing a reboot every run.
