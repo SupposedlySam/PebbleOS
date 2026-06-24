@@ -43,7 +43,7 @@
    not SRAM -- so the full dart2wasm module gets a generous GC heap for its constant object
    graph + instance state (8KB above is only enough for the no-GC smoke test). */
 #ifndef DART_GC_HEAP_SIZE_POOL
-#define DART_GC_HEAP_SIZE_POOL (4 * 1024 * 1024)
+#define DART_GC_HEAP_SIZE_POOL (1 * 1024 * 1024)  /* 1MB from the PSRAM pool (WAMR default is 128KB) */
 #endif
 #define DART_APP_STACK_SIZE (12 * 1024)
 #define DART_APP_HEAP_SIZE (12 * 1024)
@@ -66,7 +66,12 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
   // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
   if (sf32lb52_psram_is_ready()) {
     *buf = (void *)SF32LB52_PSRAM_BASE;
-    *size = SF32LB52_PSRAM_SIZE;  // full 16 MB -- PSRAM is entirely unused by PebbleOS
+    // NOTE: SF32LB52_PSRAM_SIZE is 16MB, but a 16MB pool made wasm_runtime_memory_init()
+    // FAIL (8MB succeeds). EMS gc_init only rejects bad alignment / <min size (16MB passes
+    // both), and full_init does not allocate the gc heap -- so this points at the upper
+    // PSRAM not being usable (our "16MB ready" only verified the first 256 words). Use 8MB
+    // (the verified-good lower region; plenty for the module) until the true size is probed.
+    *size = 8u * 1024u * 1024u;
     return true;
   }
 #endif
