@@ -35,4 +35,15 @@ config GH3X2X_TUNING_SERVICE_ENABLED
       Build the GH3X2X heart-rate sensor tuning GATT service, used to
       tune the sensor over BLE. Off by default.
 
+config BT_DEV_NO_BOND
+    bool "Dev: connect without BLE bonding (no pairing ceremony)"
+    default n
+    help
+      DEVELOPMENT ONLY. Do not store BLE bonds, and start the PPoGATT / kernel
+      LE client on a plain (unencrypted) connection instead of waiting for a
+      bonding-add event. This removes the macOS pairing prompt and the
+      bonded-reconnect gremlin in the phone-free Mac-gateway dev loop -- it
+      relies on the Mac hosting the PPoG characteristics WITHOUT requiring
+      encryption (PEBBLE_NO_ENCRYPT). Never enable in a shipping build.
+
 endmenu

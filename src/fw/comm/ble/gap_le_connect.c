@@ -455,6 +455,22 @@ void bt_driver_handle_le_connection_complete_event(const BleConnectionCompleteEv
         bluetooth_analytics_handle_no_intent_for_connection();
       }
 
+#ifdef CONFIG_BT_DEV_NO_BOND
+      // Dev (no-bond): bonding is disabled, so there is no bonding-add event to start the
+      // kernel LE client (which is what creates PPoGATT + discovers the gateway's PPoG
+      // service). On an incoming (slave) gateway connection, start it directly on the plain,
+      // unencrypted link by notifying the Kernel client of the connection. The Mac hosts the
+      // PPoG characteristics without requiring encryption (PEBBLE_NO_ENCRYPT), so no pairing
+      // is needed. This sidesteps the bonded-reconnect path entirely.
+      if (!local_is_master) {
+        const PebbleTaskBitset task_mask_none = ~0;
+        PebbleTaskBitset task_mask = task_mask_none;
+        task_mask &= ~gap_le_pebble_task_bit_for_client(GAPLEClientKernel);
+        prv_put_connection_event(task_mask, &connection->device, HciStatusCode_Success,
+                                 true /* connected */, BT_BONDING_ID_INVALID);
+      }
+#endif
+
 #ifdef CONFIG_RECOVERY_FW
       // In PRF, stick to shortest connection interval indefinitely:
       conn_mgr_set_ble_conn_response_time(connection, BtConsumerPRF,
@@ -539,6 +555,19 @@ void bt_driver_handle_le_disconnection_complete_event(const BleDisconnectionComp
         }
         intent = next;
       }
+
+#ifdef CONFIG_BT_DEV_NO_BOND
+      // Dev (no-bond): mirror the connect hook -- with no bonding intent, notify the Kernel
+      // client of the disconnect so PPoGATT/ANCS/AMS tear down (else they leak across the
+      // next connect). Done before gap_le_connection_remove() so connection->device is valid.
+      if (!local_is_master) {
+        const PebbleTaskBitset task_mask_none = ~0;
+        PebbleTaskBitset task_mask = task_mask_none;
+        task_mask &= ~gap_le_pebble_task_bit_for_client(GAPLEClientKernel);
+        prv_put_connection_event(task_mask, &connection->device, event->reason,
+                                 false /* disconnected */, BT_BONDING_ID_INVALID);
+      }
+#endif
 
       gap_le_connection_remove(&event->peer_address);
       break;

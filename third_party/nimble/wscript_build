@@ -94,6 +94,12 @@ elif bld.env.CONFIG_SOC_SF32LB52:
 
     nimble_use.append('hal_sifli')
 
+    if bld.env.CONFIG_BT_DEV_NO_BOND:
+        # Dev: don't store BLE bonds. syscfg.h #ifndef-guards this value, so a -D wins.
+        # Pairs with the kernel-LE-client dev hook (gap_le_connect.c) that starts PPoGATT
+        # on a plain connect, since with no bond there is no bonding-add event to start it.
+        nimble_env.append_value('DEFINES', ['MYNEWT_VAL_BLE_SM_BONDING=0'])
+
     if bld.env.CONFIG_NIMBLE_HCI_SF32LB52_TRACE_BINARY:
         bld.env.append_unique('DEFINES', [
             'NIMBLE_HCI_SF32LB52_TRACE',

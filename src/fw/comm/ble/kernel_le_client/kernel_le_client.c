@@ -490,11 +490,15 @@ void kernel_le_client_handle_event(const PebbleEvent *e) {
 }
 
 // -------------------------------------------------------------------------------------------------
+#ifndef CONFIG_BT_DEV_NO_BOND
+// Only used by the bonding-driven connect path, which no-bond dev mode disables (it
+// starts the gateway client on plain connect via the gap_le_connect.c dev hook instead).
 static void prv_connect_gateway_bonding(BTBondingID gateway_bonding) {
   gap_le_slave_reconnect_start();
   gap_le_connect_connect_by_bonding(gateway_bonding, true /* auto_reconnect */,
                                  true /* is_pairing_required */, GAPLEClientKernel);
 }
+#endif
 
 // -------------------------------------------------------------------------------------------------
 static void prv_cancel_connect_gateway_bonding(BTBondingID gateway_bonding) {
@@ -515,7 +519,12 @@ void kernel_le_client_handle_bonding_change(BTBondingID bonding, BtPersistBondin
     if (op == BtPersistBondingOpWillDelete) {
       prv_cancel_connect_gateway_bonding(bonding);
     } else if (op == BtPersistBondingOpDidAdd) {
+#ifndef CONFIG_BT_DEV_NO_BOND
+      // No-bond dev mode starts the gateway client on plain connect (see the dev hook in
+      // gap_le_connect.c); registering a bonding-based intent here too would deliver a
+      // SECOND connected event -> ppogatt_create()'s PBL_ASSERTN(!s_ppogatt_head) trips.
       prv_connect_gateway_bonding(bonding);
+#endif
     }
   }
 }
@@ -525,10 +534,15 @@ void kernel_le_client_init(void) {
   // Reset analytics
   ppogatt_reset_disconnect_counter();
 
+#ifndef CONFIG_BT_DEV_NO_BOND
+  // No-bond dev mode starts the gateway client on plain connect (dev hook in
+  // gap_le_connect.c), so don't also connect a (possibly stale) stored bonding here --
+  // that would deliver a second connected event and trip ppogatt_create()'s assert.
   BTBondingID gateway_bonding = bt_persistent_storage_get_ble_ancs_bonding();
   if (gateway_bonding != BT_BONDING_ID_INVALID) {
     prv_connect_gateway_bonding(gateway_bonding);
   }
+#endif
 }
 
 // -------------------------------------------------------------------------------------------------
