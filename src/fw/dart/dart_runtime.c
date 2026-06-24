@@ -45,6 +45,12 @@
 #ifndef DART_GC_HEAP_SIZE_POOL
 #define DART_GC_HEAP_SIZE_POOL (1 * 1024 * 1024)  /* 1MB from the PSRAM pool (WAMR default is 128KB) */
 #endif
+/* Minimum probed-usable PSRAM to bother routing the pool through it: the full module needs
+   the 67KB writable copy + GC heap + linear memory (~194KB). Below this, fall back to the
+   SRAM system allocator (which only fits the no-GC smoke test). */
+#ifndef DART_POOL_MIN_SIZE
+#define DART_POOL_MIN_SIZE (256 * 1024)
+#endif
 #define DART_APP_STACK_SIZE (12 * 1024)
 #define DART_APP_HEAP_SIZE (12 * 1024)
 #define DART_EXEC_STACK_SIZE (12 * 1024)
@@ -90,11 +96,17 @@ bool dart_runtime_init(void) {
 
   void *pool_buf = NULL;
   uint32_t pool_size = 0;
-  if (dart_runtime_pool(&pool_buf, &pool_size)) {
+  if (dart_runtime_pool(&pool_buf, &pool_size) && pool_size >= DART_POOL_MIN_SIZE) {
     init_args.mem_alloc_type = Alloc_With_Pool;
     init_args.mem_alloc_option.pool.heap_buf = pool_buf;
     init_args.mem_alloc_option.pool.heap_size = pool_size;
-    init_args.gc_heap_size = DART_GC_HEAP_SIZE_POOL;  // big GC heap from PSRAM (full module)
+    // The GC heap is carved from the pool; cap it to a quarter of the (possibly small)
+    // usable region so it always fits alongside the 67KB module copy + linear memory.
+    uint32_t gc_heap = DART_GC_HEAP_SIZE_POOL;
+    if (gc_heap > pool_size / 4u) {
+      gc_heap = pool_size / 4u;
+    }
+    init_args.gc_heap_size = gc_heap;
   } else {
     init_args.mem_alloc_type = Alloc_With_System_Allocator;
     init_args.gc_heap_size = DART_GC_HEAP_SIZE;        // small SRAM heap (smoke test / QEMU)

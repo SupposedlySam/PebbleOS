@@ -245,31 +245,48 @@ static int prv_psram_tap_sweep(PsramEmitFn emit) {
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
 uint32_t sf32lb52_psram_size(void) {
-  static uint32_t s_probed_size;  // cached; 0 = not yet probed
+  static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
   if (!s_psram_ready) {
     return 0u;
   }
   if (s_probed_size != 0u) {
     return s_probed_size;
   }
-  // ALIAS-BOUNDARY PROBE. The MPI controller transmits full-width addresses and has no
-  // size register, so a die smaller than SF32LB52_PSRAM_SIZE wraps high addresses onto
-  // the low region. The real die size is the smallest power-of-two offset whose write
-  // corrupts offset 0 (offset == die-size maps to physical 0). SBUS reads/writes here are
-  // WDTR-bounded, so this can't hang. Writes are confined to offset 0 and one probe cell.
+  // USABLE-SIZE PROBE. A single write-one/read-one passes anywhere and a 1KB sequential
+  // test passes, but writing MANY cells across a large span then reading them back fails
+  // (and the EMS heap corrupts) -- it is NOT clean power-of-two aliasing. So measure what
+  // actually works the way a heap uses it: the largest contiguous region that survives a
+  // full write-all-then-read-all. Test doubling sizes; return the largest that verifies
+  // exactly. SBUS reads/writes are WDTR-bounded (can't hang); feed the watchdog through the
+  // long scans. This is the size a pool can safely span.
   volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
-  uint32_t size = SF32LB52_PSRAM_SIZE;  // default: no alias found within the window
-  for (uint32_t off = 64u * 1024u; off <= SF32LB52_PSRAM_SIZE; off <<= 1) {
-    base[0] = 0x600DC0DEu;
-    base[off / 4u] = 0xA11A5000u | off;  // distinct marker at the candidate boundary
+  uint32_t usable = 0u;
+  for (uint32_t sz = 64u * 1024u; sz <= SF32LB52_PSRAM_SIZE; sz <<= 1) {
+    const uint32_t words = sz / 4u;
+    for (uint32_t i = 0; i < words; i++) {
+      base[i] = 0x5A5A0000u ^ i;
+      if ((i & 0x3fffu) == 0u) {
+        prompt_watchdog_feed();
+      }
+    }
     __DSB();
-    if (base[0] != 0x600DC0DEu) {  // the marker wrapped onto offset 0 -> die == off
-      size = off;
+    bool ok = true;
+    for (uint32_t i = 0; i < words; i++) {
+      if (base[i] != (0x5A5A0000u ^ i)) {
+        ok = false;
+        break;
+      }
+      if ((i & 0x3fffu) == 0u) {
+        prompt_watchdog_feed();
+      }
+    }
+    if (!ok) {
       break;
     }
+    usable = sz;  // this size fully verified; try the next
   }
-  s_probed_size = size;
-  return size;
+  s_probed_size = usable;
+  return usable;
 }
 
 //! Sink for one diagnostic line (console `psram` command). PsramEmitFn is declared
@@ -335,14 +352,9 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   // configured window and ALIAS (high addresses wrap onto low) -- which corrupts any heap
   // placed across the full window. Probe the true size by finding the alias-wrap boundary.
   if (s_psram_ready) {
-    uint32_t real = sf32lb52_psram_size();
-    if (real < SF32LB52_PSRAM_SIZE) {
-      sniprintf(buf, sizeof(buf), "psram SIZE: ALIASES -> real die = %u MB (%u KB); cfg window %u MB",
-                (unsigned)(real / (1024u * 1024u)), (unsigned)(real / 1024u), PSRAM_MSIZE_MB);
-    } else {
-      sniprintf(buf, sizeof(buf), "psram SIZE: no alias in %u MB window -- full %u MB usable",
-                PSRAM_MSIZE_MB, PSRAM_MSIZE_MB);
-    }
+    uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region
+    sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window",
+              (unsigned)(usable / 1024u), (unsigned)(usable / (1024u * 1024u)), PSRAM_MSIZE_MB);
     emit(buf);
   }
 
