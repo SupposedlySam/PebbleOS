@@ -155,6 +155,16 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   if (s_psram_init_res == HAL_OK && cfg.SpiMode == SPI_MODE_HBPSRAM) {
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 0u);
     emit("psram step: RBSIZE override -> 0 (no row boundary)");
+    // CR0 BURST/LATENCY FIX. HAL_HYPER_PSRAM_Init writes CR0 = (1<<12)|0x078f, which byte-swaps
+    // onto the bus to 0x8F07 = WRAPPED 32-byte burst, hybrid burst DISABLED, VARIABLE latency --
+    // while the controller is set to FIXED latency (HAL_MPI_EN_FIXLAT(1)). Long linear AHB bursts
+    // then wrap within 32-byte groups and mis-address (a single word/<=32B read passes, anything
+    // spanning a wrap group corrupts -> the observed ~1-4KB usable cliff), and the fixed/variable
+    // latency mismatch adds load-dependent corruption. Rewrite CR0 with hybrid burst ENABLED
+    // (clear pre-swap bit10) + device FIXED latency (set pre-swap bit11): (1<<12)|0x0B8f = 0x1B8f.
+    // (Latency nibble (1<<12) is the HAL's 144MHz/div=2 value; matches the controller's FIXLAT.)
+    HAL_HYPER_PSRAM_WriteCR(&s_psram_handle, 0u, 0x1B8fu);
+    emit("psram step: CR0 override -> 0x1B8f (hybrid burst + fixed latency)");
   }
   s_psram_inited = true;
   emit("psram step: init returned");
@@ -368,28 +378,6 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region
     sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window",
               (unsigned)(usable / 1024u), (unsigned)(usable / (1024u * 1024u)), PSRAM_MSIZE_MB);
-    emit(buf);
-
-    // RBSIZE SWEEP (diagnostic). RBSIZE=7(1KB) and 0(none) both yielded ~4KB usable, so sweep
-    // the whole 3-bit field LIVE -- HAL_FLASH_SET_ROW_BOUNDARY is a single MODIFY_REG (no
-    // re-init) -- and report usable per value. Either a value unlocks MB-scale (the fix) or all
-    // stay ~4KB (RBSIZE ruled out -> the cliff is elsewhere, e.g. CR0 wrapped-burst). bytes per
-    // rb: 0=none, n>=1 => 2^(n+3) (rb=4=>128B .. rb=7=>1KB).
-    uint32_t best_rb = 0u, best_usable = 0u;
-    for (uint32_t rb = 0u; rb <= 7u; rb++) {
-      HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, (uint8_t)rb);
-      uint32_t u = prv_psram_usable_bytes();
-      sniprintf(buf, sizeof(buf), "psram rbsweep: rb=%u usable=%u KB", (unsigned)rb,
-                (unsigned)(u / 1024u));
-      emit(buf);
-      if (u > best_usable) {
-        best_usable = u;
-        best_rb = rb;
-      }
-    }
-    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, (uint8_t)best_rb);  // leave controller at best
-    sniprintf(buf, sizeof(buf), "psram rbsweep: BEST rb=%u -> %u KB", (unsigned)best_rb,
-              (unsigned)(best_usable / 1024u));
     emit(buf);
   }
 
