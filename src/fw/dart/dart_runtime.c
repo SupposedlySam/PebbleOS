@@ -39,6 +39,12 @@
    need a much larger GC heap from a PSRAM pool. */
 #define DART_GC_HEAP_SIZE (8 * 1024)
 #endif
+/* When the WAMR pool is backed by PSRAM (obelix), the GC heap draws from that 8MB pool,
+   not SRAM -- so the full dart2wasm module gets a generous GC heap for its constant object
+   graph + instance state (8KB above is only enough for the no-GC smoke test). */
+#ifndef DART_GC_HEAP_SIZE_POOL
+#define DART_GC_HEAP_SIZE_POOL (4 * 1024 * 1024)
+#endif
 #define DART_APP_STACK_SIZE (12 * 1024)
 #define DART_APP_HEAP_SIZE (12 * 1024)
 #define DART_EXEC_STACK_SIZE (12 * 1024)
@@ -60,7 +66,7 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
   // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
   if (sf32lb52_psram_is_ready()) {
     *buf = (void *)SF32LB52_PSRAM_BASE;
-    *size = 8u * 1024u * 1024u;  // 8 MB of the 16 MB for the WAMR global pool
+    *size = SF32LB52_PSRAM_SIZE;  // full 16 MB -- PSRAM is entirely unused by PebbleOS
     return true;
   }
 #endif
@@ -83,10 +89,11 @@ bool dart_runtime_init(void) {
     init_args.mem_alloc_type = Alloc_With_Pool;
     init_args.mem_alloc_option.pool.heap_buf = pool_buf;
     init_args.mem_alloc_option.pool.heap_size = pool_size;
+    init_args.gc_heap_size = DART_GC_HEAP_SIZE_POOL;  // big GC heap from PSRAM (full module)
   } else {
     init_args.mem_alloc_type = Alloc_With_System_Allocator;
+    init_args.gc_heap_size = DART_GC_HEAP_SIZE;        // small SRAM heap (smoke test / QEMU)
   }
-  init_args.gc_heap_size = DART_GC_HEAP_SIZE;
   init_args.native_module_name = "dart";
   init_args.native_symbols =
       dart_embedder_get_natives(&init_args.n_native_symbols);
@@ -171,6 +178,8 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
      (const) module must be copied to RAM; the copy stays valid until unload.
      On SRAM-only boards this competes with the GC heap; a PSRAM pool removes
      the constraint. */
+  // Step markers (shipped over the console) to pin where a big module stalls on-device.
+  prompt_send_response("dart: [1] rt init OK; copying module");
   module_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
   if (!module_buf) {
     PBL_LOG_ERR("dart: no RAM for module copy (%" PRIu32 " bytes)", wasm_size);
@@ -180,6 +189,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   }
   memcpy(module_buf, wasm_buf, wasm_size);
 
+  prompt_send_response("dart: [2] copied; loading (WAMR parse/validate)");
   module = wasm_runtime_load(module_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!module) {
     PBL_LOG_ERR("dart: load failed: %s", error_buf);
@@ -187,6 +197,7 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
     goto cleanup;
   }
 
+  prompt_send_response("dart: [3] loaded; instantiating (GC heap)");
   inst = wasm_runtime_instantiate(module, DART_APP_STACK_SIZE,
                                   DART_APP_HEAP_SIZE, error_buf,
                                   sizeof(error_buf));
@@ -196,12 +207,14 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
     goto cleanup;
   }
 
+  prompt_send_response("dart: [4] instantiated; creating exec env");
   exec_env = wasm_runtime_create_exec_env(inst, DART_EXEC_STACK_SIZE);
   if (!exec_env) {
     PBL_LOG_ERR("dart: exec_env create failed");
     goto cleanup;
   }
 
+  prompt_send_response("dart: [5] invoking main");
   ok = prv_call_invoke_main(module, inst, exec_env);
   if (ok) {
     PBL_LOG_DBG("dart: module ran OK");
