@@ -46,3 +46,51 @@ index 7d49cdaa..8bfd6ff5 100644
      delay = hflash->Instance->CALCR & MPI_CALCR_DELAY_Msk;
      hflash->Instance->CALCR &= ~MPI_CALCR_EN;
  
+diff --git a/drivers/hal/bf0_hal_rcc.c b/drivers/hal/bf0_hal_rcc.c
+index d80e0065..c9f168bf 100644
+--- a/drivers/hal/bf0_hal_rcc.c
++++ b/drivers/hal/bf0_hal_rcc.c
+@@ -1618,8 +1618,19 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_RCC_HCPU_EnableDLL(int dll, uint32_t freq)
+     HAL_Delay_us(0);
+     /** wait for DLL ready, 5us at least */
+     HAL_Delay_us(10);
+-    while (0 == ((*cr) & HPSYS_RCC_DLL1CR_READY))
+-    {
++    /* PEBBLE: bound this DLL-ready spin (mirrors the MPI CAL/TCF guards). The original
++     * `while(!(DLLxCR & READY)){}` has NO timeout, so a DLL that never locks wedges the
++     * caller forever. Cap it; on timeout fall through (status still HAL_OK -- the caller
++     * verifies the actual frequency afterward, and PSRAM bring-up reads back DLL2 freq and
++     * aborts if it's 0). ~tens of ms at 240MHz, far longer than a real lock (<=tens of us). */
++    {
++        volatile uint32_t guard = 8000000u;
++        while (0 == ((*cr) & HPSYS_RCC_DLL1CR_READY))
++        {
++            if (--guard == 0) {
++                break;
++            }
++        }
+     }
+ 
+     status = HAL_OK;
+@@ -1683,8 +1694,19 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_RCC_HCPU_EnableDLL(int dll, uint32_t freq)
+     HAL_Delay_us(0);
+     /** wait for DLL ready, 5us at least */
+     HAL_Delay_us(10);
+-    while (0 == ((*cr) & HPSYS_RCC_DLL1CR_READY))
+-    {
++    /* PEBBLE: bound this DLL-ready spin (mirrors the MPI CAL/TCF guards). The original
++     * `while(!(DLLxCR & READY)){}` has NO timeout, so a DLL that never locks wedges the
++     * caller forever. Cap it; on timeout fall through (status still HAL_OK -- the caller
++     * verifies the actual frequency afterward, and PSRAM bring-up reads back DLL2 freq and
++     * aborts if it's 0). ~tens of ms at 240MHz, far longer than a real lock (<=tens of us). */
++    {
++        volatile uint32_t guard = 8000000u;
++        while (0 == ((*cr) & HPSYS_RCC_DLL1CR_READY))
++        {
++            if (--guard == 0) {
++                break;
++            }
++        }
+     }
+ 
+     status = HAL_OK;
