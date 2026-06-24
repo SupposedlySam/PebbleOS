@@ -165,6 +165,15 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
     // (Latency nibble (1<<12) is the HAL's 144MHz/div=2 value; matches the controller's FIXLAT.)
     HAL_HYPER_PSRAM_WriteCR(&s_psram_handle, 0u, 0x1B8fu);
     emit("psram step: CR0 override -> 0x1B8f (hybrid burst + fixed latency)");
+    // tCMS / REFRESH FIX (best fit for the 4KB cliff). CSLMAX (max CS#-low) is 1140 cycles
+    // ~= 7.9us @144MHz, but Winbond HyperRAM tCMS (max CS# low before refresh is starved) is
+    // ~4us. A long linear burst then holds CS# low past tCMS, the chip can't self-refresh, and
+    // data decays after ~4us (~4KB) -- matching the 4KB usable cliff AND the worsens-under-load
+    // degradation. Lower CSLMAX so the controller de-asserts CS# within tCMS. Preserve the OPI-
+    // path 144MHz init values cs_min=6, cshmin=5, trcmin=17 (impl arg order: cslmin, cslmax,
+    // cshmin, trcmin -- the header's names are mislabeled).
+    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 512u, 5u, 17u);
+    emit("psram step: CSLMAX override -> 512 cycles (~3.6us, under tCMS)");
   }
   s_psram_inited = true;
   emit("psram step: init returned");
