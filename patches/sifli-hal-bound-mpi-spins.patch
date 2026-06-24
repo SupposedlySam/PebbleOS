@@ -1,3 +1,26 @@
+diff --git a/drivers/hal/bf0_hal_mpi.c b/drivers/hal/bf0_hal_mpi.c
+index 675f3bff..6102181f 100644
+--- a/drivers/hal/bf0_hal_mpi.c
++++ b/drivers/hal/bf0_hal_mpi.c
+@@ -213,7 +213,17 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_FLASH_SET_CMD(FLASH_HandleTypeDef *hflash,
+     }
+     hflash->Instance->CMDR1 = cmd & 0XFF;
+ 
+-    while (!HAL_FLASH_IS_CMD_DONE(hflash));
++    {
++        // PEBBLE: bound this spin (mirrors the CAL_DELAY guard in bf0_hal_mpi_psram.c). The
++        // original `while(!IS_CMD_DONE);` has NO timeout, so a device that never asserts TCF
++        // (e.g. PSRAM not acking the CR0 write after a clock/DQS reconfigure) wedges KernelBG
++        // forever. Callers ignore the return, so on timeout we just proceed -- the PSRAM
++        // tap-sweep / read-back test then catches a truly dead part instead of hanging.
++        volatile uint32_t guard = 4000000u;
++        while (!HAL_FLASH_IS_CMD_DONE(hflash)) {
++            if (--guard == 0) { res = HAL_TIMEOUT; break; }
++        }
++    }
+     HAL_FLASH_CLR_CMD_DONE(hflash);
+ 
+     return res;
 diff --git a/drivers/hal/bf0_hal_mpi_psram.c b/drivers/hal/bf0_hal_mpi_psram.c
 index 7d49cdaa..8bfd6ff5 100644
 --- a/drivers/hal/bf0_hal_mpi_psram.c

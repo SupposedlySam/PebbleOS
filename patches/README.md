@@ -7,25 +7,33 @@ the project's hard rule: no PR/push to upstreams we don't own without explicit a
 The build expects them applied to the working tree. They are kept as `.patch` files so a
 fresh `git submodule update` can re-apply them and so the change is reviewable.
 
-## sifli-hal-bound-cal-spin.patch
+## sifli-hal-bound-mpi-spins.patch
 
-Target: `third_party/hal_sifli/SiFli-SDK` (`coredevices/SiFli-SDK`),
-file `drivers/hal/bf0_hal_mpi_psram.c`.
+Target: `third_party/hal_sifli/SiFli-SDK` (`coredevices/SiFli-SDK`), files
+`drivers/hal/bf0_hal_mpi_psram.c` and `drivers/hal/bf0_hal_mpi.c`.
 
-Bounds the PSRAM read-strobe auto-calibration spin in `HAL_MPI_OPSRAM_CAL_DELAY`. The
-upstream code is `while(!(CALCR & DONE));` with **no timeout** — if the calibration DONE
-bit never asserts (wrong strobe / non-responding part) it wedges KernelBG forever and the
-watchdog reboot-loops. The patch caps the spin; on timeout init falls through (the
-off-center tap it leaves is overridden by our explicit tap sweep in
-`src/fw/soc/sf32lb/sf32lb52x/psram.c` anyway). This keeps PSRAM bring-up from ever
-wedging the watch.
+Bounds the **two unbounded hardware-status spins** reachable from `HAL_MPI_PSRAM_Init` on
+the HBPSRAM (Winbond HYPERBUS, obelix) path, both of which can wedge KernelBG forever (and
+trigger the watchdog reboot loop) when the part doesn't respond after a clock/DQS reconfigure:
+
+1. **`HAL_MPI_OPSRAM_CAL_DELAY`** (`bf0_hal_mpi_psram.c`): the read-strobe auto-calibration
+   `while(!(CALCR & DONE));`.
+2. **`HAL_FLASH_SET_CMD`** (`bf0_hal_mpi.c`): the manual-command `while(!(SR & TCF));` — hit
+   during init via `HAL_HYPER_PSRAM_WriteCR` (the CR0 write). This was the observed init hang.
+
+Both are capped with a generous counter; on timeout init falls through (callers ignore the
+return / the off-center tap is overridden by our explicit tap sweep in
+`src/fw/soc/sf32lb/sf32lb52x/psram.c`). A truly dead part is then caught by the WDTR-bounded
+read-back test instead of hanging. Confirmed effective (not ROM-shadowed): this tree builds
+with waf, so `ROM_ENABLED` is undefined and `__HAL_ROM_USED` expands empty -> these are plain
+strong definitions compiled from source.
 
 Apply / re-apply / remove:
 ```sh
 cd third_party/hal_sifli/SiFli-SDK
-git apply ../../../patches/sifli-hal-bound-cal-spin.patch        # apply
-git apply -R ../../../patches/sifli-hal-bound-cal-spin.patch     # revert
-git apply --check ../../../patches/sifli-hal-bound-cal-spin.patch # dry-run / verify applies
+git apply ../../../patches/sifli-hal-bound-mpi-spins.patch        # apply
+git apply -R ../../../patches/sifli-hal-bound-mpi-spins.patch     # revert
+git apply --check ../../../patches/sifli-hal-bound-mpi-spins.patch # dry-run / verify applies
 ```
 (The submodule is at a detached HEAD; `git -C third_party/hal_sifli/SiFli-SDK status`
-will show the file as modified once applied — that's expected and intentional.)
+will show the files as modified once applied — that's expected and intentional.)
