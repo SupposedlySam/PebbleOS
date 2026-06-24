@@ -254,26 +254,16 @@ static int prv_psram_tap_sweep(PsramEmitFn emit) {
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
-uint32_t sf32lb52_psram_size(void) {
-  static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
-  if (!s_psram_ready) {
-    return 0u;
-  }
-  if (s_probed_size != 0u) {
-    return s_probed_size;
-  }
-  // USABLE-SIZE PROBE. A single write-one/read-one passes anywhere and a 1KB sequential
-  // test passes, but writing MANY cells across a large span then reading them back fails
-  // (and the EMS heap corrupts) -- it is NOT clean power-of-two aliasing. So measure what
-  // actually works the way a heap uses it: the largest contiguous region that survives a
-  // full write-all-then-read-all. Test doubling sizes; return the largest that verifies
-  // exactly. SBUS reads/writes are WDTR-bounded (can't hang); feed the watchdog through the
-  // long scans. This is the size a pool can safely span.
+//! USABLE-SIZE PROBE (non-caching). A single write-one/read-one passes anywhere and a 1KB
+//! sequential test passes, but writing MANY cells across a large span then reading them back
+//! fails (and the EMS heap corrupts) -- it is NOT clean power-of-two aliasing. So measure what
+//! actually works the way a heap uses it: the largest contiguous region that survives a full
+//! write-all-then-read-all. Test doubling sizes from 1KB; return the largest that verifies
+//! exactly (the first FAILURE pinpoints the corruption cliff). SBUS reads/writes are WDTR-
+//! bounded (can't hang); feed the watchdog through the long scans.
+static uint32_t prv_psram_usable_bytes(void) {
   volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
   uint32_t usable = 0u;
-  // Start at 1KB (the size the simple test already proves) and double, so the first FAILURE
-  // pinpoints the corruption cliff -- expected to coincide with the HYPERBUS row-boundary
-  // size if the row-boundary (RBSIZE) config is wrong.
   for (uint32_t sz = 1024u; sz <= SF32LB52_PSRAM_SIZE; sz <<= 1) {
     const uint32_t words = sz / 4u;
     for (uint32_t i = 0; i < words; i++) {
@@ -298,8 +288,18 @@ uint32_t sf32lb52_psram_size(void) {
     }
     usable = sz;  // this size fully verified; try the next
   }
-  s_probed_size = usable;
   return usable;
+}
+
+uint32_t sf32lb52_psram_size(void) {
+  static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
+  if (!s_psram_ready) {
+    return 0u;
+  }
+  if (s_probed_size == 0u) {
+    s_probed_size = prv_psram_usable_bytes();
+  }
+  return s_probed_size;
 }
 
 //! Sink for one diagnostic line (console `psram` command). PsramEmitFn is declared
@@ -368,6 +368,28 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region
     sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window",
               (unsigned)(usable / 1024u), (unsigned)(usable / (1024u * 1024u)), PSRAM_MSIZE_MB);
+    emit(buf);
+
+    // RBSIZE SWEEP (diagnostic). RBSIZE=7(1KB) and 0(none) both yielded ~4KB usable, so sweep
+    // the whole 3-bit field LIVE -- HAL_FLASH_SET_ROW_BOUNDARY is a single MODIFY_REG (no
+    // re-init) -- and report usable per value. Either a value unlocks MB-scale (the fix) or all
+    // stay ~4KB (RBSIZE ruled out -> the cliff is elsewhere, e.g. CR0 wrapped-burst). bytes per
+    // rb: 0=none, n>=1 => 2^(n+3) (rb=4=>128B .. rb=7=>1KB).
+    uint32_t best_rb = 0u, best_usable = 0u;
+    for (uint32_t rb = 0u; rb <= 7u; rb++) {
+      HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, (uint8_t)rb);
+      uint32_t u = prv_psram_usable_bytes();
+      sniprintf(buf, sizeof(buf), "psram rbsweep: rb=%u usable=%u KB", (unsigned)rb,
+                (unsigned)(u / 1024u));
+      emit(buf);
+      if (u > best_usable) {
+        best_usable = u;
+        best_rb = rb;
+      }
+    }
+    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, (uint8_t)best_rb);  // leave controller at best
+    sniprintf(buf, sizeof(buf), "psram rbsweep: BEST rb=%u -> %u KB", (unsigned)best_rb,
+              (unsigned)(best_usable / 1024u));
     emit(buf);
   }
 
