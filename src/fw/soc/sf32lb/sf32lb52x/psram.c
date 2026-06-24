@@ -146,6 +146,16 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
   emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
+  // ROW-BOUNDARY FIX. HAL_MPI_PSRAM_Init inherits RBSIZE=7 (=2^(7+3)=1024B, the 3-bit
+  // field's max) from the OPI/XCCELA bring-up path -- it is never chosen for the Winbond
+  // HyperBus part. With a 1KB row boundary the controller chops linear bursts at 1KB and
+  // mis-addresses across the real (larger) device row, so anything spanning >1KB corrupts
+  // (matches the observed 1KB usable cliff exactly). Override to 0 = no row boundary so
+  // linear AHB bursts run uninterrupted. (DCR.RBSIZE is a single MODIFY_REG; safe post-init.)
+  if (s_psram_init_res == HAL_OK && cfg.SpiMode == SPI_MODE_HBPSRAM) {
+    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 0u);
+    emit("psram step: RBSIZE override -> 0 (no row boundary)");
+  }
   s_psram_inited = true;
   emit("psram step: init returned");
   return s_psram_init_res;
@@ -261,7 +271,10 @@ uint32_t sf32lb52_psram_size(void) {
   // long scans. This is the size a pool can safely span.
   volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
   uint32_t usable = 0u;
-  for (uint32_t sz = 64u * 1024u; sz <= SF32LB52_PSRAM_SIZE; sz <<= 1) {
+  // Start at 1KB (the size the simple test already proves) and double, so the first FAILURE
+  // pinpoints the corruption cliff -- expected to coincide with the HYPERBUS row-boundary
+  // size if the row-boundary (RBSIZE) config is wrong.
+  for (uint32_t sz = 1024u; sz <= SF32LB52_PSRAM_SIZE; sz <<= 1) {
     const uint32_t words = sz / 4u;
     for (uint32_t i = 0; i < words; i++) {
       base[i] = 0x5A5A0000u ^ i;
