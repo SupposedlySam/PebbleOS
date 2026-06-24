@@ -66,12 +66,12 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
   // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
   if (sf32lb52_psram_is_ready()) {
     *buf = (void *)SF32LB52_PSRAM_BASE;
-    // NOTE: SF32LB52_PSRAM_SIZE is 16MB, but a 16MB pool made wasm_runtime_memory_init()
-    // FAIL (8MB succeeds). EMS gc_init only rejects bad alignment / <min size (16MB passes
-    // both), and full_init does not allocate the gc heap -- so this points at the upper
-    // PSRAM not being usable (our "16MB ready" only verified the first 256 words). Use 8MB
-    // (the verified-good lower region; plenty for the module) until the true size is probed.
-    *size = 8u * 1024u * 1024u;
+    // Size the pool to the REAL die, not SF32LB52_PSRAM_SIZE: the MPI controller has no size
+    // register, so a die smaller than the configured window aliases (high addresses wrap onto
+    // low) and corrupts a heap spanning the full window -- which is why a 67KB malloc failed
+    // from a (nominally 8MB) pool. sf32lb52_psram_size() probes the alias boundary and returns
+    // the true usable size.
+    *size = sf32lb52_psram_size();
     return true;
   }
 #endif
