@@ -292,6 +292,10 @@ static uint32_t prv_psram_usable_bytes(void) {
       }
     }
     __DSB();
+    // The PSRAM window is cacheable (write-back), so flush the just-written lines out to PSRAM
+    // and drop the cache -- otherwise the read-back below would hit the cache and pass trivially
+    // without ever exercising the silicon. After this, reads miss and re-fetch from PSRAM.
+    SCB_CleanInvalidateDCache();
     bool ok = true;
     for (uint32_t i = 0; i < words; i++) {
       if (base[i] != (0x5A5A0000u ^ i)) {

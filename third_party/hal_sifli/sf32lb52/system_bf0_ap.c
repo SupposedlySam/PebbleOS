@@ -24,11 +24,18 @@ enum {
   ATTR_CODE_IDX,
   ATTR_RAM_IDX,
   ATTR_DEVICE_IDX,
+  ATTR_PSRAM_IDX,
 };
 
 #define ATTR_CODE ARM_MPU_ATTR(ARM_MPU_ATTR_MEMORY_(0, 0, 1, 0), ARM_MPU_ATTR_MEMORY_(0, 0, 1, 0))
 #define ATTR_RAM ARM_MPU_ATTR(ARM_MPU_ATTR_NON_CACHEABLE, ARM_MPU_ATTR_NON_CACHEABLE)
 #define ATTR_DEVICE ARM_MPU_ATTR(ARM_MPU_ATTR_DEVICE, ARM_MPU_ATTR_DEVICE_nGnRnE)
+// PSRAM: Normal, write-back read+write-allocate (matches the SiFli reference's ATTR_PSRAM_WB).
+// The HyperBus controller's UNCACHED memory-mapped long-burst continuation is broken (only the
+// first CS#-low burst transfers correctly -> uncached bulk access corrupts past ~1-4KB). Marking
+// the PSRAM window cacheable makes the D-cache batch all access into 32-byte cache-line bursts,
+// which the controller handles correctly -- this is how the SDK does bulk PSRAM access.
+#define ATTR_PSRAM ARM_MPU_ATTR(ARM_MPU_ATTR_MEMORY_(0, 1, 1, 1), ARM_MPU_ATTR_MEMORY_(0, 1, 1, 1))
 
 // FIXME(SF32LB52): ARMv8 MPU support is not complete, so for now, configure
 // the MPU here as needed by the system to run.
@@ -44,6 +51,7 @@ static void prv_mpu_config(void) {
   ARM_MPU_SetMemAttr(ATTR_CODE_IDX, ATTR_CODE);
   ARM_MPU_SetMemAttr(ATTR_RAM_IDX, ATTR_RAM);
   ARM_MPU_SetMemAttr(ATTR_DEVICE_IDX, ATTR_DEVICE);
+  ARM_MPU_SetMemAttr(ATTR_PSRAM_IDX, ATTR_PSRAM);
 
   // Flash code, region 1
   // Non-shareable, RO, any privilege, executable
@@ -80,6 +88,13 @@ static void prv_mpu_config(void) {
   rbar = ARM_MPU_RBAR(0x2007fc00, ARM_MPU_SH_NON, 0, 0, 1);
   rlar = ARM_MPU_RLAR(0x2007ffff, ATTR_RAM_IDX);
   ARM_MPU_SetRegion(4U, rbar, rlar);
+
+  // PSRAM window (MPI1, 0x60000000). Cacheable write-back so bulk access goes through the
+  // D-cache as 32-byte cache-line bursts (the controller's uncached long-burst continuation is
+  // broken). Non-shareable, RW, any privilege, non-executable.
+  rbar = ARM_MPU_RBAR(0x60000000, ARM_MPU_SH_NON, 0, 1, 1);
+  rlar = ARM_MPU_RLAR(0x61ffffff, ATTR_PSRAM_IDX);
+  ARM_MPU_SetRegion(5U, rbar, rlar);
 
   ARM_MPU_Enable(MPU_CTRL_HFNMIENA_Msk | MPU_CTRL_PRIVDEFENA_Msk);
 }
