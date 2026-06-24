@@ -33,6 +33,7 @@
 #include "console/prompt.h"
 #include "system/logging.h"
 
+#include "psram.h"
 #include "psram_tapwindow.h"
 
 #include <stdbool.h>
