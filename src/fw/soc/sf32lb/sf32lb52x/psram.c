@@ -146,35 +146,13 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
   emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
-  // ROW-BOUNDARY FIX. HAL_MPI_PSRAM_Init inherits RBSIZE=7 (=2^(7+3)=1024B, the 3-bit
-  // field's max) from the OPI/XCCELA bring-up path -- it is never chosen for the Winbond
-  // HyperBus part. With a 1KB row boundary the controller chops linear bursts at 1KB and
-  // mis-addresses across the real (larger) device row, so anything spanning >1KB corrupts
-  // (matches the observed 1KB usable cliff exactly). Override to 0 = no row boundary so
-  // linear AHB bursts run uninterrupted. (DCR.RBSIZE is a single MODIFY_REG; safe post-init.)
-  if (s_psram_init_res == HAL_OK && cfg.SpiMode == SPI_MODE_HBPSRAM) {
-    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 0u);
-    emit("psram step: RBSIZE override -> 0 (no row boundary)");
-    // CR0 BURST/LATENCY FIX. HAL_HYPER_PSRAM_Init writes CR0 = (1<<12)|0x078f, which byte-swaps
-    // onto the bus to 0x8F07 = WRAPPED 32-byte burst, hybrid burst DISABLED, VARIABLE latency --
-    // while the controller is set to FIXED latency (HAL_MPI_EN_FIXLAT(1)). Long linear AHB bursts
-    // then wrap within 32-byte groups and mis-address (a single word/<=32B read passes, anything
-    // spanning a wrap group corrupts -> the observed ~1-4KB usable cliff), and the fixed/variable
-    // latency mismatch adds load-dependent corruption. Rewrite CR0 with hybrid burst ENABLED
-    // (clear pre-swap bit10) + device FIXED latency (set pre-swap bit11): (1<<12)|0x0B8f = 0x1B8f.
-    // (Latency nibble (1<<12) is the HAL's 144MHz/div=2 value; matches the controller's FIXLAT.)
-    HAL_HYPER_PSRAM_WriteCR(&s_psram_handle, 0u, 0x1B8fu);
-    emit("psram step: CR0 override -> 0x1B8f (hybrid burst + fixed latency)");
-    // tCMS / REFRESH FIX (best fit for the 4KB cliff). CSLMAX (max CS#-low) is 1140 cycles
-    // ~= 7.9us @144MHz, but Winbond HyperRAM tCMS (max CS# low before refresh is starved) is
-    // ~4us. A long linear burst then holds CS# low past tCMS, the chip can't self-refresh, and
-    // data decays after ~4us (~4KB) -- matching the 4KB usable cliff AND the worsens-under-load
-    // degradation. Lower CSLMAX so the controller de-asserts CS# within tCMS. Preserve the OPI-
-    // path 144MHz init values cs_min=6, cshmin=5, trcmin=17 (impl arg order: cslmin, cslmax,
-    // cshmin, trcmin -- the header's names are mislabeled).
-    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 512u, 5u, 17u);
-    emit("psram step: CSLMAX override -> 512 cycles (~3.6us, under tCMS)");
-  }
+  // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
+  // cliff. That cliff was the UNCACHED memory-mapped long-burst continuation being broken, NOT a
+  // controller-register problem -- the real fix is the cacheable MPU region over 0x60000000
+  // (system_bf0_ap.c) so the D-cache batches access into 32B line bursts. Those overrides were
+  // treating the symptom on the wrong path, so they're removed: the controller now uses the HAL
+  // defaults (what the SiFli SDK runs with). If cached access still misbehaves, re-investigate
+  // the cache controller's PSRAM access / the SCK-DQS tap under cached bursts, not these knobs.
   s_psram_inited = true;
   emit("psram step: init returned");
   return s_psram_init_res;
