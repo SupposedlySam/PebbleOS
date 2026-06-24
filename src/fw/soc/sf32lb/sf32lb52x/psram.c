@@ -92,22 +92,33 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   emit("psram step: restore pinmux");
   prv_restore_pinmux();
 
-  // MPI1 (FLASH1) off DLL2 @ 288 MHz; div 2 -> 144 MHz, per the SiFli board_init_psram
-  // path. Reference enables DLL2 at 240 THEN 288 (two-step lock) -- replicate it; a
-  // single EnableDLL2(288) may not lock. Done once -- re-selecting the clock hangs.
-  emit("psram step: EnableDLL2(240)");
-  HAL_RCC_HCPU_EnableDLL2(240000000);
-  emit("psram step: EnableDLL2(288)");
-  HAL_RCC_HCPU_EnableDLL2(288000000);
-  // DLL2 settle. HAL_RCC_HCPU_EnableDLL's DLL2CR.READY spin can exit before DLL2 is truly
-  // stable; reparenting FLASH1 onto an under-baked DLL2 stalls the next access. Give it
-  // time to lock before the ClockSelect switch. (The hang was right at this switch.)
-  emit("psram step: DLL2 settle 500us");
-  HAL_Delay_us(500);
-  emit("psram step: ClockSelect FLASH1<-DLL2");
+  // CLOCK: do NOT reconfigure DLL2 at runtime. DLL2 is already up at boot (the bootrom
+  // clocks XIP code flash FLASH2/MPI2 from it). HAL_RCC_HCPU_EnableDLL2 DISABLES DLL2
+  // (bf0_hal_rcc.c `DLL2CR &= ~EN`) to reprogram it; for the ~tens-of-us relock DLL2
+  // produces no clock, which FREEZES the FLASH2 XIP instruction fetch and HARD-STALLS the
+  // HCPU mid-call (the HCPU core itself runs on DLL1, so it's the XIP path that dies). That
+  // was the "hang at the clock step". The reference only calls EnableDLL2 at boot, BEFORE
+  // FLASH2 is pointed at DLL2. So: leave DLL2 alone, just point the idle FLASH1 (MPI1/PSRAM)
+  // at the existing DLL2; the PSRAM rate is set by the MPI1 divider (the `div` arg), not by
+  // retuning DLL2. Read-back first to confirm DLL2 is pre-running (safety/diagnostic).
+  {
+    char clkbuf[128];
+    uint32_t dll2_hz = HAL_RCC_HCPU_GetDLL2Freq();
+    sniprintf(clkbuf, sizeof(clkbuf),
+              "psram clk(pre): dll2=%uHz flash2_src=%d (HCPU on DLL1; no DLL2 reconfig)",
+              (unsigned)dll2_hz,
+              (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH2));
+    emit(clkbuf);
+    // GUARD: DLL2 should already be running (the bootrom clocks XIP from it). If it's not,
+    // do NOT reparent FLASH1 onto a dead clock -- abort cleanly. (Not cached in s_psram_*,
+    // so a retry can re-check.) This is exactly the failure the read-back exists to detect.
+    if (dll2_hz == 0) {
+      emit("psram ERROR: DLL2 not running -- aborting (won't clock FLASH1 off a dead DLL2)");
+      return HAL_ERROR;
+    }
+  }
+  emit("psram step: ClockSelect FLASH1<-DLL2 (no reconfigure)");
   HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
-  // Finer marker: if THIS ships, ClockSelect returned and the hang is later (init); if it
-  // never ships, the FLASH1<-DLL2 switch itself stalls (DLL2 instability).
   emit("psram step: ClockSelect returned");
 
   // Feed the KernelBG watchdog: controller init can be slow.
