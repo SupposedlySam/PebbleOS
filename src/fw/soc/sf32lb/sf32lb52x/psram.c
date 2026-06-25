@@ -69,7 +69,7 @@ static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA11, MPI1_DIO7, PIN_PULLDOWN, 1);
   HAL_PIN_Set(PAD_SA07, MPI1_CLK, PIN_NOPULL, 1);
   HAL_PIN_Set(PAD_SA05, MPI1_CS, PIN_NOPULL, 1);
-  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_NOPULL, 1);
+  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_PULLDOWN, 1);  // ref pulls DQS down; floating DQS defeats the read-strobe cal
   HAL_PIN_Set_Analog(PAD_SA00, 1);  // DM unused on Winbond HYPERBUS
   HAL_PIN_Set_Analog(PAD_SA06, 1);  // CLKB unused on Winbond HYPERBUS
 }
@@ -87,9 +87,17 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
     return s_psram_init_res;
   }
 
-  // PSRAM is powered by VDD_SiP, not the internal 1.8 V LDO18 (init.c disables LDO18
-  // for exactly this reason). Do NOT enable LDO18 -- it fights the external SiP rail
-  // and corrupts reads. Just un-park the pins and clock the controller.
+  // POWER (corrected 2026-06-25 via SiFli HW spec + SDK): on the SF32LB52J SiP the PSRAM die is
+  // fed by the INTERNAL 1.8V LDO -- LDO18 / PMU_PERI_LDO_1V8 == VDD18_VOUT, listed as "SiP power".
+  // There is NO separate external VDD_SiP rail on the J part. init.c powers LDO18 DOWN at boot on
+  // a (wrong) "VDD_SiP powers it" theory, which leaves the PSRAM UNPOWERED -- so the read-strobe
+  // auto-cal can't sample the device (CALCR.DONE never asserts) and every bulk read corrupts
+  // ("no passing DQS tap anywhere" = power, not tap-centering). Enable LDO18 before bring-up and
+  // let the rail settle. (The SDK reference sf32lb52-lcd_base enables LDO18 for this HyperBus part.)
+  emit("psram step: enable LDO18 (1.8V SiP/PSRAM rail)");
+  HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true);
+  HAL_Delay_us(5000);
+
   emit("psram step: restore pinmux");
   prv_restore_pinmux();
 
@@ -167,18 +175,17 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
   emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
-  // Now the controller is fully enabled + in HyperBus mode, so the read-strobe cal can actually
-  // sample the (now-woken) device. Run it explicitly and report whether DONE asserts + the
-  // calibrated tap. A non-zero DELAY / sensible dqs (~mid-window) = the cal locked (vs the
-  // DONE=0/DELAY=0 we saw when the chip was unwoken). AUTO_CAL also applies the sck/dqs.
-  if (s_psram_init_res == HAL_OK && cfg.SpiMode == SPI_MODE_HBPSRAM) {
-    uint8_t cal_sck = 0u, cal_dqs = 0u;
-    HAL_MPI_OPSRAM_AUTO_CAL(&s_psram_handle, &cal_sck, &cal_dqs);
-    char cb[96];
+  // Capture the HAL's OWN read-strobe cal result immediately. HAL_MPI_PSRAM_Init runs the cal
+  // internally, in OPI mode BEFORE HyperBus is enabled (HAL_HYPER_PSRAM_Init -> HAL_OPI_PSRAM_Init
+  // -> HAL_MPI_OPSRAM_CAL_DELAY). Do NOT re-run AUTO_CAL afterwards -- that re-cals out-of-sequence
+  // (HyperBus already enabled) and can leave DONE=0 even if init's cal succeeded. With LDO18 now
+  // powering the die, CALCR.DELAY should be NON-ZERO (the cal locked) vs the 0 seen when unpowered.
+  if (s_psram_init_res == HAL_OK) {
+    char cb[80];
     uint32_t cc = s_psram_handle.Instance->CALCR;
-    sniprintf(cb, sizeof(cb), "psram AUTO_CAL: CALCR=0x%08x DELAY=%u sck=%u dqs=%u",
-              (unsigned)cc, (unsigned)((cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
-              (unsigned)cal_sck, (unsigned)cal_dqs);
+    sniprintf(cb, sizeof(cb), "psram CAL(init): CALCR=0x%08x DONE=%u DELAY=%u", (unsigned)cc,
+              (unsigned)((cc & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
+              (unsigned)((cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos));
     emit(cb);
   }
   // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
