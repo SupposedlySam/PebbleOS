@@ -158,7 +158,15 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   switch (s_psram_pid) {
     case 5: cfg.SpiMode = SPI_MODE_PSRAM; break;     // 16Mb APM QSPI
     case 4: cfg.SpiMode = SPI_MODE_LEGPSRAM; break;  // 32Mb LEGACY
-    case 6: cfg.SpiMode = SPI_MODE_HBPSRAM; break;   // Winbond HYPERBUS (obelix)
+    // EXPERIMENT (-76): PID=6 maps to BOOT_PSRAM_WINBOND (HyperBus) per the SiFli reference, BUT
+    // the read-strobe cal won't lock in EITHER framing (OPI from init, OR HyperBus from the post-
+    // init re-cal -- both DONE=0 across -73/-74/-75, rail powered), and web docs say the SF32LB52J
+    // in-package PSRAM is OPI-PSRAM (Xccela), not HyperBus. Test the OPI path: it runs the cal in
+    // OPI framing (correct for an OPI part) and writes MR8 (burst/wrap), which directly targets the
+    // "small reads OK / bulk corrupts" wrap signature. If the cal now locks + bulk works -> the part
+    // is OPI and PID=6 misled us. If it still fails -> PID=6=Winbond stands -> marginal silicon.
+    // (Original: case 6 -> SPI_MODE_HBPSRAM.)
+    case 6: cfg.SpiMode = SPI_MODE_OPSRAM; break;    // EXPERIMENT: was SPI_MODE_HBPSRAM (Winbond/HyperBus)
     case 2:                                          // XCELLA OPI
     case 3:
     default: cfg.SpiMode = SPI_MODE_OPSRAM; break;
