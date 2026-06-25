@@ -94,9 +94,18 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // auto-cal can't sample the device (CALCR.DONE never asserts) and every bulk read corrupts
   // ("no passing DQS tap anywhere" = power, not tap-centering). Enable LDO18 before bring-up and
   // let the rail settle. (The SDK reference sf32lb52-lcd_base enables LDO18 for this HyperBus part.)
-  emit("psram step: enable LDO18 (1.8V SiP/PSRAM rail)");
-  HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true);
+  // Enable LDO18 by directly UNDOING init.c's power-down: clear LDO18_PD (init.c SET it -- and
+  // PD overrides EN, so HAL_PMU_ConfigPeriLdo(en=true) alone may leave the rail off) AND set
+  // EN_LDO18. Report PERI_LDO so we can confirm the rail is actually on (EN=1, PD=0).
+  emit("psram step: enable LDO18 (clear PD + set EN)");
+  hwp_pmuc->PERI_LDO &= ~PMUC_PERI_LDO_LDO18_PD_Msk;
+  hwp_pmuc->PERI_LDO |= PMUC_PERI_LDO_EN_LDO18_Msk;
   HAL_Delay_us(5000);
+  {
+    char lb[72];
+    sniprintf(lb, sizeof(lb), "psram LDO18: PERI_LDO=0x%08x", (unsigned)hwp_pmuc->PERI_LDO);
+    emit(lb);
+  }
 
   emit("psram step: restore pinmux");
   prv_restore_pinmux();
@@ -421,6 +430,11 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   // others fail -> the tap IS the lever (worth a full fine sweep); if ALL fail -> the tap is NOT
   // the cause (look elsewhere / suspect silicon). Leaves DQS at the best-scoring tap for dart.
   if (s_psram_ready) {
+    sniprintf(buf, sizeof(buf), "psram LDO18: PERI_LDO=0x%08x (EN=%u PD=%u)",
+              (unsigned)hwp_pmuc->PERI_LDO,
+              (unsigned)((hwp_pmuc->PERI_LDO & PMUC_PERI_LDO_EN_LDO18_Msk) ? 1u : 0u),
+              (unsigned)((hwp_pmuc->PERI_LDO & PMUC_PERI_LDO_LDO18_PD_Msk) ? 1u : 0u));
+    emit(buf);
     uint32_t calcr = s_psram_handle.Instance->CALCR;
     sniprintf(buf, sizeof(buf), "psram CALCR: DONE=%u DELAY=%u EN=%u (raw=0x%08x)",
               (unsigned)((calcr & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
