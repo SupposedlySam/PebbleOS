@@ -374,6 +374,68 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     emit(buf);
   }
 
+  // VALIDATE the read-strobe-tap hypothesis instead of assuming it. First report the HARDWARE
+  // auto-cal result: CALCR.DONE (did the calibration complete on this unit?) + the chosen DELAY.
+  // Then SCORE a spread of DQS taps by a REAL 64KB cached write-all/read-all (the trivial 8-word
+  // sweep passes at every tap; sustained bursts are the real test). If some tap PASSES 64KB where
+  // others fail -> the tap IS the lever (worth a full fine sweep); if ALL fail -> the tap is NOT
+  // the cause (look elsewhere / suspect silicon). Leaves DQS at the best-scoring tap for dart.
+  if (s_psram_ready) {
+    uint32_t calcr = s_psram_handle.Instance->CALCR;
+    sniprintf(buf, sizeof(buf), "psram CALCR: DONE=%u DELAY=%u EN=%u (raw=0x%08x)",
+              (unsigned)((calcr & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
+              (unsigned)((calcr & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
+              (unsigned)((calcr & MPI_CALCR_EN_Msk) >> MPI_CALCR_EN_Pos), (unsigned)calcr);
+    emit(buf);
+
+    volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
+    const uint32_t words = (64u * 1024u) / 4u;
+    static const uint8_t dqs_probe[] = {0u,  16u, 32u,  48u,  64u,  80u,  96u,  112u,
+                                        128u, 144u, 160u, 176u, 192u, 208u, 224u, 240u};
+    uint8_t best_dqs = 0u;
+    uint32_t best_ok = 0u;
+    bool any_pass = false;
+    for (unsigned t = 0; t < sizeof(dqs_probe); t++) {
+      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, dqs_probe[t]);
+      HAL_Delay_us(50);
+      for (uint32_t i = 0; i < words; i++) {
+        base[i] = 0x7A7A0000u ^ i;
+        if ((i & 0x3fffu) == 0u) {
+          prompt_watchdog_feed();
+        }
+      }
+      __DSB();
+      SCB_CleanInvalidateDCache();  // force the read-back to re-fetch from PSRAM, not the cache
+      uint32_t okw = 0u;
+      bool ok = true;
+      for (uint32_t i = 0; i < words; i++) {
+        if (base[i] != (0x7A7A0000u ^ i)) {
+          ok = false;
+          break;
+        }
+        okw++;
+        if ((i & 0x3fffu) == 0u) {
+          prompt_watchdog_feed();
+        }
+      }
+      if (okw > best_ok) {
+        best_ok = okw;
+        best_dqs = dqs_probe[t];
+      }
+      if (ok) {
+        any_pass = true;
+      }
+      sniprintf(buf, sizeof(buf), "psram taptest: dqs=%u %s ok=%u/%u", (unsigned)dqs_probe[t],
+                ok ? "PASS" : "fail", (unsigned)okw, (unsigned)words);
+      emit(buf);
+    }
+    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+    HAL_Delay_us(50);
+    sniprintf(buf, sizeof(buf), "psram taptest: BEST dqs=%u ok=%u/%u any_pass=%u",
+              (unsigned)best_dqs, (unsigned)best_ok, (unsigned)words, (unsigned)any_pass);
+    emit(buf);
+  }
+
   // NOTE: the HYPERBUS register reads (HAL_HYPER_PSRAM_ReadID/ReadCR) are deliberately
   // NOT called here -- they spin on TCF with no timeout and HANG KernelBG forever (the
   // read strobe never completes), wedging the console and forcing a reboot every run.
