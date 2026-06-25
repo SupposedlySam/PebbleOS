@@ -439,6 +439,21 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   }
   emit(buf);
 
+  // DECISIVE DIAGNOSTIC: read the HyperBus device ID + CR0 back. SAFE now -- HAL_FLASH_READ32 is a
+  // bare DR read (no spin) and HAL_FLASH_SET_CMD's TCF spin is bounded by our patch (the old
+  // "ReadID hangs" was the PRE-patch unbounded TCF). Placed early so it ships before the long tap
+  // sweep. ID0 != 0/0xffff => device answers in HyperBus framing. CR0 should equal HAL_HYPER_PSRAM_
+  // Init's mr0 for the current clock (72MHz -> (14<<12)|0x078f = 0xe78f); if CR0 differs, the latency
+  // write didn't land (byte-swap/framing) -- which would explain zero reads at every tap.
+  if (s_psram_ready) {
+    uint16_t hb_id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+    uint16_t hb_cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+    uint16_t hb_cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
+    sniprintf(buf, sizeof(buf), "psram HB readback: ID0=0x%04x CR0=0x%04x CR1=0x%04x",
+              (unsigned)hb_id0, (unsigned)hb_cr0, (unsigned)hb_cr1);
+    emit(buf);
+  }
+
   // REAL SIZE: the 256-word test only proves the first 1KB. The die may be smaller than the
   // configured window and ALIAS (high addresses wrap onto low) -- which corrupts any heap
   // placed across the full window. Probe the true size by finding the alias-wrap boundary.
