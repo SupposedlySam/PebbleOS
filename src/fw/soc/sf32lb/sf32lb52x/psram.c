@@ -475,6 +475,20 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
               (unsigned)((calcr & MPI_CALCR_EN_Msk) >> MPI_CALCR_EN_Pos), (unsigned)calcr);
     emit(buf);
 
+    // HyperBus device READBACK (diagnostic). These go through HAL_FLASH_SET_CMD whose TCF spin is
+    // bounded by our HAL patch, so they time out to garbage instead of hanging. Tells us whether
+    // the device RESPONDS in HyperBus framing (ID) and whether the CR0 latency write landed (CR0
+    // should read back HAL_HYPER_PSRAM_Init's mr0: at 144MHz that's (1<<12)|0x078f = 0x178f). If
+    // ID/CR0 read back as 0x0000/0xffff -> device not answering in HyperBus mode (-> the cal-in-OPI
+    // ordering bug); if CR0 != 0x178f -> the write didn't take.
+    uint16_t hb_id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+    uint16_t hb_id1 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 1);
+    uint16_t hb_cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+    uint16_t hb_cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
+    sniprintf(buf, sizeof(buf), "psram HB readback: ID0=0x%04x ID1=0x%04x CR0=0x%04x CR1=0x%04x",
+              (unsigned)hb_id0, (unsigned)hb_id1, (unsigned)hb_cr0, (unsigned)hb_cr1);
+    emit(buf);
+
     volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
     const uint32_t words = (64u * 1024u) / 4u;
     static const uint8_t dqs_probe[] = {0u,  16u, 32u,  48u,  64u,  80u,  96u,  112u,
