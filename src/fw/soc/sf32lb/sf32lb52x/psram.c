@@ -76,6 +76,10 @@ static void prv_restore_pinmux(void) {
 
 typedef void (*PsramEmitFn)(const char *line);
 
+// Defined later; forward-declared so prv_psram_init can ship a bulk-usable number EARLY (before the
+// long console diag drops the BLE session).
+static uint32_t prv_psram_usable_at(uint32_t base_addr, uint32_t max_sz);
+
 //! Bring up the MPI1 PSRAM controller exactly ONCE. Idempotent: later calls return
 //! the cached result without touching the clock/controller (re-init hangs the watch).
 //! div = MPI1 clock divider (canonical = 2 -> DLL2 288 MHz / 2 = 144 MHz).
@@ -217,6 +221,22 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
               (unsigned)((cc2 & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
               (unsigned)((cc2 & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
               (unsigned)rsck, (unsigned)rdqs);
+    emit(cb);
+    // Ship the DECISIVE signals HERE, early -- the long console diag below reliably drops the BLE
+    // session right after the w0 read, so the HB readback + bulk USABLE never make it out from the
+    // diag. Emitting them in the init path (alongside the CAL emits, which DO ship) beats the drop.
+    // CR0 should read back HAL_HYPER_PSRAM_Init's mr0 (72MHz -> 0xe78f); USABLE tells us if BULK
+    // works at the cal's tap (where w0 read correct on -81), not just a single word.
+    uint16_t id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
+    uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
+    uint16_t cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
+    sniprintf(cb, sizeof(cb), "psram HB readback: ID0=0x%04x CR0=0x%04x CR1=0x%04x",
+              (unsigned)id0, (unsigned)cr0, (unsigned)cr1);
+    emit(cb);
+    uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 256u * 1024u);
+    uint32_t uc = prv_psram_usable_at(0x10000000u, 256u * 1024u);
+    sniprintf(cb, sizeof(cb), "psram USABLE(early): SBUS=%uKB CBUS=%uKB (of 256KB tested)",
+              (unsigned)(us / 1024u), (unsigned)(uc / 1024u));
     emit(cb);
   }
   // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
