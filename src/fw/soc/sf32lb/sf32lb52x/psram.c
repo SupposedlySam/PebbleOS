@@ -101,12 +101,14 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // 288 may not lock). The RCC DLL2-READY spin is bounded by our HAL patch so EnableDLL2
   // cannot wedge. Fine markers + a ~20ms flush delay around each call so the LAST shipped
   // marker pins exactly which call stalls (the bring-up has hung somewhere around here).
-  emit("psram step: EnableDLL2(240) call"); HAL_Delay_us(20000);
-  HAL_RCC_HCPU_EnableDLL2(240000000);
-  emit("psram step: EnableDLL2(240) ret"); HAL_Delay_us(20000);
-  emit("psram step: EnableDLL2(288) call"); HAL_Delay_us(20000);
-  HAL_RCC_HCPU_EnableDLL2(288000000);
-  emit("psram step: EnableDLL2(288) ret"); HAL_Delay_us(20000);
+  // DIAGNOSTIC (-69): run HyperBus at 72MHz instead of 144MHz to test whether the bulk-access
+  // corruption is a 144MHz read-timing/strobe-margin issue (single words pass on a marginal tap;
+  // sustained 144MHz DTR bursts don't). HAL_OPI_PSRAM_Init forces PSCLR=1, so HyperBus freq =
+  // DLL2/2; DLL2=144MHz -> 72MHz HyperBus, and the HAL then auto-selects the <=85MHz CR0/latency
+  // band. (The old 240->288 two-step was for the 288 target; 144 locks in a single step.)
+  emit("psram step: EnableDLL2(144) call"); HAL_Delay_us(20000);
+  HAL_RCC_HCPU_EnableDLL2(144000000);
+  emit("psram step: EnableDLL2(144) ret"); HAL_Delay_us(20000);
   {
     char clkbuf[128];
     uint32_t dll2_hz = HAL_RCC_HCPU_GetDLL2Freq();
