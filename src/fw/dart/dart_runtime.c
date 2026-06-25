@@ -72,12 +72,14 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
   // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
   if (sf32lb52_psram_is_ready()) {
     *buf = (void *)SF32LB52_PSRAM_BASE;
-    // Size the pool to the REAL die, not SF32LB52_PSRAM_SIZE: the MPI controller has no size
-    // register, so a die smaller than the configured window aliases (high addresses wrap onto
-    // low) and corrupts a heap spanning the full window -- which is why a 67KB malloc failed
-    // from a (nominally 8MB) pool. sf32lb52_psram_size() probes the alias boundary and returns
-    // the true usable size.
-    *size = sf32lb52_psram_size();
+    // TEMP (bypassing sf32lb52_psram_size): the USABLE probe reports 0KB even with the PSRAM
+    // window now cacheable, but that probe forces a whole-cache CleanInvalidate round-trip which
+    // may not reflect NORMAL coherent cached access (how WAMR/dart actually use the pool: writes
+    // and reads both via the D-cache, with natural line eviction/refill to PSRAM). Hand dart a
+    // fixed cached pool and let real use be the test. If sum=45 works, the cached path is good
+    // and the probe just needs fixing; if it corrupts/crashes, cached bulk access is genuinely
+    // broken and we move to write-through / tap / DMA.
+    *size = 2u * 1024u * 1024u;
     return true;
   }
 #endif
