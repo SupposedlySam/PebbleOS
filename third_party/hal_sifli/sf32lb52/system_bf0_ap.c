@@ -89,11 +89,13 @@ static void prv_mpu_config(void) {
   rlar = ARM_MPU_RLAR(0x2007ffff, ATTR_RAM_IDX);
   ARM_MPU_SetRegion(4U, rbar, rlar);
 
-  // PSRAM window (MPI1, 0x60000000). Cacheable write-back so bulk access goes through the
-  // D-cache as 32-byte cache-line bursts (the controller's uncached long-burst continuation is
-  // broken). Non-shareable, RW, any privilege, non-executable.
-  rbar = ARM_MPU_RBAR(0x60000000, ARM_MPU_SH_NON, 0, 1, 1);
-  rlar = ARM_MPU_RLAR(0x61ffffff, ATTR_PSRAM_IDX);
+  // PSRAM window -- the CBUS (cached) port at 0x10000000, NOT the SBUS uncached port at
+  // 0x60000000. Cacheable write-back so bulk access goes through the D-cache as 32-byte cache-line
+  // bursts (the controller's uncached long-burst continuation is broken). The SBUS alias bypasses
+  // the cache regardless of MPU attr, so a cacheable region there was ineffective (measured 0KB
+  // usable); cached bulk must go through CBUS. Non-shareable, RW, any privilege, non-executable.
+  rbar = ARM_MPU_RBAR(0x10000000, ARM_MPU_SH_NON, 0, 1, 1);
+  rlar = ARM_MPU_RLAR(0x11ffffff, ATTR_PSRAM_IDX);
   ARM_MPU_SetRegion(5U, rbar, rlar);
 
   ARM_MPU_Enable(MPU_CTRL_HFNMIENA_Msk | MPU_CTRL_PRIVDEFENA_Msk);

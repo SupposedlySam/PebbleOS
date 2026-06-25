@@ -158,15 +158,11 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   switch (s_psram_pid) {
     case 5: cfg.SpiMode = SPI_MODE_PSRAM; break;     // 16Mb APM QSPI
     case 4: cfg.SpiMode = SPI_MODE_LEGPSRAM; break;  // 32Mb LEGACY
-    // EXPERIMENT (-76): PID=6 maps to BOOT_PSRAM_WINBOND (HyperBus) per the SiFli reference, BUT
-    // the read-strobe cal won't lock in EITHER framing (OPI from init, OR HyperBus from the post-
-    // init re-cal -- both DONE=0 across -73/-74/-75, rail powered), and web docs say the SF32LB52J
-    // in-package PSRAM is OPI-PSRAM (Xccela), not HyperBus. Test the OPI path: it runs the cal in
-    // OPI framing (correct for an OPI part) and writes MR8 (burst/wrap), which directly targets the
-    // "small reads OK / bulk corrupts" wrap signature. If the cal now locks + bulk works -> the part
-    // is OPI and PID=6 misled us. If it still fails -> PID=6=Winbond stands -> marginal silicon.
-    // (Original: case 6 -> SPI_MODE_HBPSRAM.)
-    case 6: cfg.SpiMode = SPI_MODE_OPSRAM; break;    // EXPERIMENT: was SPI_MODE_HBPSRAM (Winbond/HyperBus)
+    // PID=6 = BOOT_PSRAM_WINBOND (HyperBus) per the chip's own IDR + the SiFli reference mapping.
+    // (-76 tried SPI_MODE_OPSRAM in case the part were actually OPI-PSRAM, as some SiFli docs claim
+    // for the "J" variant -- but the cal still didn't lock and bulk still corrupted, identical to
+    // HyperBus. So OPI is ruled out; PID=6=Winbond stands. The bulk wall is NOT the protocol.)
+    case 6: cfg.SpiMode = SPI_MODE_HBPSRAM; break;   // Winbond HYPERBUS (obelix; PID=6)
     case 2:                                          // XCELLA OPI
     case 3:
     default: cfg.SpiMode = SPI_MODE_OPSRAM; break;
@@ -333,10 +329,10 @@ bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 //! write-all-then-read-all. Test doubling sizes from 1KB; return the largest that verifies
 //! exactly (the first FAILURE pinpoints the corruption cliff). SBUS reads/writes are WDTR-
 //! bounded (can't hang); feed the watchdog through the long scans.
-static uint32_t prv_psram_usable_bytes(void) {
-  volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
+static uint32_t prv_psram_usable_at(uint32_t base_addr, uint32_t max_sz) {
+  volatile uint32_t *base = (volatile uint32_t *)base_addr;
   uint32_t usable = 0u;
-  for (uint32_t sz = 1024u; sz <= SF32LB52_PSRAM_SIZE; sz <<= 1) {
+  for (uint32_t sz = 1024u; sz <= max_sz; sz <<= 1) {
     const uint32_t words = sz / 4u;
     for (uint32_t i = 0; i < words; i++) {
       base[i] = 0x5A5A0000u ^ i;
@@ -365,6 +361,10 @@ static uint32_t prv_psram_usable_bytes(void) {
     usable = sz;  // this size fully verified; try the next
   }
   return usable;
+}
+
+static uint32_t prv_psram_usable_bytes(void) {
+  return prv_psram_usable_at(PSRAM_TEST_BASE, SF32LB52_PSRAM_SIZE);
 }
 
 uint32_t sf32lb52_psram_size(void) {
@@ -441,9 +441,18 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   // configured window and ALIAS (high addresses wrap onto low) -- which corrupts any heap
   // placed across the full window. Probe the true size by finding the alias-wrap boundary.
   if (s_psram_ready) {
-    uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region
-    sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window",
+    uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region (SBUS)
+    sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window (SBUS)",
               (unsigned)(usable / 1024u), (unsigned)(usable / (1024u * 1024u)), PSRAM_MSIZE_MB);
+    emit(buf);
+    // CBUS (cached port 0x10000000) bulk probe -- the REAL test of cached bulk. The SBUS probe
+    // above bypasses the cache (SBUS is the uncached system-bus alias), so it only measured the
+    // broken uncached long-burst continuation. The SDK routes cached bulk through CBUS, where the
+    // D-cache batches access into 32B cache-line bursts the controller handles. The cacheable MPU
+    // region now sits over CBUS (system_bf0_ap.c). Cap at 1MB to bound exposure if a fill wedges.
+    uint32_t usable_cbus = prv_psram_usable_at(0x10000000u, 1u * 1024u * 1024u);
+    sniprintf(buf, sizeof(buf), "psram USABLE-CBUS: %u KB reliable (cached port 0x10000000)",
+              (unsigned)(usable_cbus / 1024u));
     emit(buf);
   }
 
