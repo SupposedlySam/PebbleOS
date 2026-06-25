@@ -184,17 +184,33 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
   emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
-  // Capture the HAL's OWN read-strobe cal result immediately. HAL_MPI_PSRAM_Init runs the cal
-  // internally, in OPI mode BEFORE HyperBus is enabled (HAL_HYPER_PSRAM_Init -> HAL_OPI_PSRAM_Init
-  // -> HAL_MPI_OPSRAM_CAL_DELAY). Do NOT re-run AUTO_CAL afterwards -- that re-cals out-of-sequence
-  // (HyperBus already enabled) and can leave DONE=0 even if init's cal succeeded. With LDO18 now
-  // powering the die, CALCR.DELAY should be NON-ZERO (the cal locked) vs the 0 seen when unpowered.
+  // The HAL runs its read-strobe cal (HAL_MPI_OPSRAM_CAL_DELAY) INSIDE HAL_OPI_PSRAM_Init -- i.e.
+  // in OPI framing, BEFORE HAL_HYPER_PSRAM_Init enables HyperBus (HAL_FLASH_ENABLE_HYPER) and writes
+  // the CR0 read-latency (verified: HAL_HYPER_PSRAM_Init order = OPI_PSRAM_Init -> ENABLE_HYPER ->
+  // WriteCR -> EN_FIXLAT, bf0_hal_mpi_psram.c). A Winbond HyperBus die (PID=6) can't return a valid
+  // read strobe in OPI framing, so that first cal's CALCR.DONE never asserts (we saw CALCR=0x0 across
+  // -73/-74 with the rail CONFIRMED powered). FIX (research-backed): now that init has enabled
+  // HyperBus + written CR0, RE-RUN the cal in the correct framing via HAL_MPI_OPSRAM_AUTO_CAL. (An
+  // earlier note here said "do NOT re-run AUTO_CAL" -- that was wrong; the FIRST cal is the
+  // mis-sequenced one, re-running in HyperBus framing is the whole point.) Report both so we can see
+  // OPI-framing DONE=0 flip to HB-framing DONE=1. The diag's later CALCR read (ships reliably)
+  // reflects this post-re-cal state; these in-init emits may batch away.
   if (s_psram_init_res == HAL_OK) {
-    char cb[80];
+    char cb[112];
     uint32_t cc = s_psram_handle.Instance->CALCR;
-    sniprintf(cb, sizeof(cb), "psram CAL(init): CALCR=0x%08x DONE=%u DELAY=%u", (unsigned)cc,
+    sniprintf(cb, sizeof(cb), "psram CAL(init,OPI-framing): CALCR=0x%08x DONE=%u DELAY=%u", (unsigned)cc,
               (unsigned)((cc & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
               (unsigned)((cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos));
+    emit(cb);
+    uint8_t rsck = 0, rdqs = 0;
+    int calres = HAL_MPI_OPSRAM_AUTO_CAL(&s_psram_handle, &rsck, &rdqs);
+    uint32_t cc2 = s_psram_handle.Instance->CALCR;
+    sniprintf(cb, sizeof(cb),
+              "psram CAL(recal,HB-framing): res=%d CALCR=0x%08x DONE=%u DELAY=%u sck=%u dqs=%u",
+              calres, (unsigned)cc2,
+              (unsigned)((cc2 & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
+              (unsigned)((cc2 & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
+              (unsigned)rsck, (unsigned)rdqs);
     emit(cb);
   }
   // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
