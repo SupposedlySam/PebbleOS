@@ -147,10 +147,40 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
     default: cfg.SpiMode = SPI_MODE_OPSRAM; break;
   }
 
+  // WAKE the PSRAM from deep-power-down + enable the MPI controller BEFORE init -- exactly as
+  // the SDK bootloader does (board_psram.c builds a temp handle on the MPI instance and calls
+  // HAL_MPI_EXIT_LOWP before HAL_MPI_PSRAM_Init). Obelix never did this. The consequence (root
+  // cause of the bulk-corruption wall): the read-strobe auto-cal (HAL_MPI_OPSRAM_CAL_DELAY, run
+  // inside init) drives its own probe reads, but on an unwoken/unenabled chip they return
+  // nothing -> CALCR.DONE never asserts -> uncalibrated strobe -> sustained/burst reads corrupt
+  // (small reads happen to land in a wide enough window). HAL_PSRAM_RESET is a no-op for HBPSRAM
+  // so init never wakes the chip itself. The CS-pulse wake needs ~150us (HBPSRAM branch).
+  {
+    FLASH_HandleTypeDef wake;
+    memset(&wake, 0, sizeof(wake));
+    wake.Instance = cfg.Instance;
+    HAL_MPI_EXIT_LOWP(&wake, cfg.SpiMode);
+    emit("psram step: EXIT_LOWP (wake from deep-power-down)");
+  }
+
   // memset zeroes handle.wakeup = 0 (normal, non-standby boot), per the canonical init.
   memset(&s_psram_handle, 0, sizeof(s_psram_handle));
   emit("psram step: HAL_MPI_PSRAM_Init");
   s_psram_init_res = HAL_MPI_PSRAM_Init(&s_psram_handle, &cfg, div);
+  // Now the controller is fully enabled + in HyperBus mode, so the read-strobe cal can actually
+  // sample the (now-woken) device. Run it explicitly and report whether DONE asserts + the
+  // calibrated tap. A non-zero DELAY / sensible dqs (~mid-window) = the cal locked (vs the
+  // DONE=0/DELAY=0 we saw when the chip was unwoken). AUTO_CAL also applies the sck/dqs.
+  if (s_psram_init_res == HAL_OK && cfg.SpiMode == SPI_MODE_HBPSRAM) {
+    uint8_t cal_sck = 0u, cal_dqs = 0u;
+    HAL_MPI_OPSRAM_AUTO_CAL(&s_psram_handle, &cal_sck, &cal_dqs);
+    char cb[96];
+    uint32_t cc = s_psram_handle.Instance->CALCR;
+    sniprintf(cb, sizeof(cb), "psram AUTO_CAL: CALCR=0x%08x DELAY=%u sck=%u dqs=%u",
+              (unsigned)cc, (unsigned)((cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
+              (unsigned)cal_sck, (unsigned)cal_dqs);
+    emit(cb);
+  }
   // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
   // cliff. That cliff was the UNCACHED memory-mapped long-burst continuation being broken, NOT a
   // controller-register problem -- the real fix is the cacheable MPU region over 0x60000000
