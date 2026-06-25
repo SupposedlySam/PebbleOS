@@ -118,17 +118,19 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // 288 may not lock). The RCC DLL2-READY spin is bounded by our HAL patch so EnableDLL2
   // cannot wedge. Fine markers + a ~20ms flush delay around each call so the LAST shipped
   // marker pins exactly which call stalls (the bring-up has hung somewhere around here).
-  // DLL2 @288MHz (standard) -> HyperBus 144MHz. The auto-cal (HAL_MPI_OPSRAM_CAL_DELAY) is
-  // designed to run against this clock; the -69 diagnostic at DLL2=144 (72MHz) ruled out clock
-  // as the bulk-corruption cause but may have prevented the cal from locking, so run the cal at
-  // the standard clock and re-check CALCR.DONE. Two-step 240->288 per the reference (a single
-  // 288 may not lock).
-  emit("psram step: EnableDLL2(240) call"); HAL_Delay_us(20000);
-  HAL_RCC_HCPU_EnableDLL2(240000000);
-  emit("psram step: EnableDLL2(240) ret"); HAL_Delay_us(20000);
-  emit("psram step: EnableDLL2(288) call"); HAL_Delay_us(20000);
-  HAL_RCC_HCPU_EnableDLL2(288000000);
-  emit("psram step: EnableDLL2(288) ret"); HAL_Delay_us(20000);
+  // CLOCK EXPERIMENT (-80): DLL2 @144MHz -> HyperBus 72MHz (MPI1 div 2). At 144MHz the device read
+  // came back ZERO at every DQS tap (w0=0), which points to a WHOLE-CYCLE read-latency error (the
+  // HAL's 144MHz CR0 latency code likely under-counts; datasheet says 144MHz needs the 6-clock
+  // setting). No sub-cycle tap can fix a whole-cycle miss. At 72MHz, HAL_HYPER_PSRAM_Init auto-picks
+  // the unambiguous low-clock latency code (freq<=85MHz branch) and the data-valid window is far
+  // wider -> real reads should land. If w0/USABLE come back correct here, the wall was read latency,
+  // not silicon. Two-step ramp 120->144 (a single high step may not lock; 144 is well within range).
+  emit("psram step: EnableDLL2(120) call"); HAL_Delay_us(20000);
+  HAL_RCC_HCPU_EnableDLL2(120000000);
+  emit("psram step: EnableDLL2(120) ret"); HAL_Delay_us(20000);
+  emit("psram step: EnableDLL2(144) call"); HAL_Delay_us(20000);
+  HAL_RCC_HCPU_EnableDLL2(144000000);
+  emit("psram step: EnableDLL2(144) ret"); HAL_Delay_us(20000);
   {
     char clkbuf[128];
     uint32_t dll2_hz = HAL_RCC_HCPU_GetDLL2Freq();
@@ -475,20 +477,9 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
               (unsigned)((calcr & MPI_CALCR_EN_Msk) >> MPI_CALCR_EN_Pos), (unsigned)calcr);
     emit(buf);
 
-    // HyperBus device READBACK (diagnostic). These go through HAL_FLASH_SET_CMD whose TCF spin is
-    // bounded by our HAL patch, so they time out to garbage instead of hanging. Tells us whether
-    // the device RESPONDS in HyperBus framing (ID) and whether the CR0 latency write landed (CR0
-    // should read back HAL_HYPER_PSRAM_Init's mr0: at 144MHz that's (1<<12)|0x078f = 0x178f). If
-    // ID/CR0 read back as 0x0000/0xffff -> device not answering in HyperBus mode (-> the cal-in-OPI
-    // ordering bug); if CR0 != 0x178f -> the write didn't take.
-    uint16_t hb_id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
-    uint16_t hb_id1 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 1);
-    uint16_t hb_cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
-    uint16_t hb_cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
-    sniprintf(buf, sizeof(buf), "psram HB readback: ID0=0x%04x ID1=0x%04x CR0=0x%04x CR1=0x%04x",
-              (unsigned)hb_id0, (unsigned)hb_id1, (unsigned)hb_cr0, (unsigned)hb_cr1);
-    emit(buf);
-
+    // NOTE: do NOT read the HyperBus device ID/CR here -- HAL_HYPER_PSRAM_ReadID HANGS KernelBG on
+    // this part (the TCF wait in that path is not bounded by our spin patch). Confirmed on -79: the
+    // diag wedged exactly at the readback. Use real array reads (w0 / USABLE) to judge instead.
     volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
     const uint32_t words = (64u * 1024u) / 4u;
     static const uint8_t dqs_probe[] = {0u,  16u, 32u,  48u,  64u,  80u,  96u,  112u,
