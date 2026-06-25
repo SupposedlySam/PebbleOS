@@ -69,7 +69,7 @@ static void prv_restore_pinmux(void) {
   HAL_PIN_Set(PAD_SA11, MPI1_DIO7, PIN_PULLDOWN, 1);
   HAL_PIN_Set(PAD_SA07, MPI1_CLK, PIN_NOPULL, 1);
   HAL_PIN_Set(PAD_SA05, MPI1_CS, PIN_NOPULL, 1);
-  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_PULLDOWN, 1);  // ref pulls DQS down; floating DQS defeats the read-strobe cal
+  HAL_PIN_Set(PAD_SA12, MPI1_DQSDM, PIN_NOPULL, 1);  // Winbond case uses NOPULL (board_psram.c func4 :96); a pulldown biases the DQS strobe -> cal can't lock
   HAL_PIN_Set_Analog(PAD_SA00, 1);  // DM unused on Winbond HYPERBUS
   HAL_PIN_Set_Analog(PAD_SA06, 1);  // CLKB unused on Winbond HYPERBUS
 }
