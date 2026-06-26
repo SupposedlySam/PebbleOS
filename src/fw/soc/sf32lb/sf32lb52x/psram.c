@@ -447,6 +447,34 @@ static uint32_t prv_psram_alias_errs(void) {
   return errs;
 }
 
+// ADDRESS-WRAP / row-size finder: for each distance D (words), write distinct values at base[0] and
+// base[D] and read BOTH back. base[0] is read AFTER writing base[D] (different address), so a 1-deep
+// write buffer can't fake it. The smallest D where they stop being independent reveals address wrap
+// (row/array addressing broken -> only ~one row reachable). All INDEP => addressing is fine.
+static void prv_psram_wrap_scan(void (*emit_fn)(const char *)) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  char b[96];
+  static const uint32_t ds[] = {64u,    128u,   256u,   512u,   1024u,  2048u,
+                                4096u,  8192u,  16384u, 32768u, 65536u};  // words: 256B .. 256KB
+  for (unsigned i = 0; i < sizeof(ds) / sizeof(ds[0]); i++) {
+    uint32_t D = ds[i];
+    base[0] = 0xAAAA0000u;
+    __DSB();
+    base[D] = 0x55550000u;
+    __DSB();
+    uint32_t v0 = base[0];
+    uint32_t vd = base[D];
+    __DSB();
+    const char *st = (v0 == 0xAAAA0000u && vd == 0x55550000u) ? "INDEP"
+                     : (v0 == 0x55550000u)                    ? "WRAP(0<-D)"
+                                                              : "BAD";
+    sniprintf(b, sizeof(b), "psram WRAP D=%uB: v0=%08x vd=%08x %s", (unsigned)(D * 4u),
+              (unsigned)v0, (unsigned)vd, st);
+    emit_fn(b);
+    prompt_watchdog_feed();
+  }
+}
+
 // RETENTION discriminator: write 16 markers, burn `spin` empty iterations with NO PSRAM access (so
 // the device, CS# idle-high, should self-refresh), then read back. errs growing with spin => the
 // self-refresh isn't maintaining the array => fix CR1/refresh config.
@@ -597,19 +625,14 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // small reads work. A heap does scattered small accesses -- the working mode. Test that directly
     // over a 256KB UNCACHED SBUS span (>194KB the module needs). If errs==0, the PSRAM is usable as a
     // (slow, uncached) heap and we can point the WAMR/Dart pool at 0x60000000.
-    // -100 DISCRIMINATOR: -99 showed interleave(immediate)=0 errs but separated(write-all-then-read)
-    // =3995 errs. Is it ALIASING (far addresses collide) or RETENTION (data decays over time)?
-    uint32_t al = prv_psram_alias_errs();
-    uint32_t r0 = prv_psram_retain_errs(0u);
-    uint32_t r1 = prv_psram_retain_errs(2000000u);
-    uint32_t r2 = prv_psram_retain_errs(20000000u);
-    uint32_t r_int = prv_psram_random_test(256u * 1024u, 4000u, 1);
-    sniprintf(buf, sizeof(buf),
-              "psram DISCRIM: alias16=%u retain[0]=%u retain[2M]=%u retain[20M]=%u interleave4000=%u",
-              (unsigned)al, (unsigned)r0, (unsigned)r1, (unsigned)r2, (unsigned)r_int);
-    emit(buf);
-    s_tapbreak_best = (r_int == 0u) ? (256u * 1024u) : 0u;
-    s_psram_ready = (r_int == 0u);
+    // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
+    // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
+    // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
+    prv_psram_wrap_scan(emit);
+    (void)prv_psram_alias_errs;
+    (void)prv_psram_retain_errs;
+    (void)prv_psram_random_test;
+    s_psram_ready = false;
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
