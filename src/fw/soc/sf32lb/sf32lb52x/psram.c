@@ -420,6 +420,25 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     return;
   }
 
+  // REGISTER DUMP (research #1) -- FIRST emit so it always ships. The bulk-read cliff is likely a
+  // CS#-timing / burst (tCSM) violation governed by DCR: a HyperRAM needs CS# to drop periodically
+  // for self-refresh; CS# held too long (CSLMAX too high / RBSIZE too coarse) corrupts past a bound.
+  {
+    uint32_t dcr = s_psram_handle.Instance->DCR;
+    uint32_t cr = s_psram_handle.Instance->CR;
+    sniprintf(buf, sizeof(buf),
+              "psram DCR=0x%08x RBSIZE=%u CSLMAX=%u CSLMIN=%u CSHMIN=%u TRCMIN=%u FIXLAT=%u PREFE=%u",
+              (unsigned)dcr,
+              (unsigned)((dcr & MPI_DCR_RBSIZE_Msk) >> MPI_DCR_RBSIZE_Pos),
+              (unsigned)((dcr & MPI_DCR_CSLMAX_Msk) >> MPI_DCR_CSLMAX_Pos),
+              (unsigned)((dcr & MPI_DCR_CSLMIN_Msk) >> MPI_DCR_CSLMIN_Pos),
+              (unsigned)((dcr & MPI_DCR_CSHMIN_Msk) >> MPI_DCR_CSHMIN_Pos),
+              (unsigned)((dcr & MPI_DCR_TRCMIN_Msk) >> MPI_DCR_TRCMIN_Pos),
+              (unsigned)((dcr & MPI_DCR_FIXLAT_Msk) >> MPI_DCR_FIXLAT_Pos),
+              (unsigned)((cr & MPI_CR_PREFE_Msk) >> MPI_CR_PREFE_Pos));
+    emit(buf);
+  }
+
   // Emit LAST run's tap-break sweep result FIRST -- guaranteed to ship before the ~3s session drop,
   // even when this run's sweep (below) gets cut off. Fire `psram 2` twice to read it.
   if (s_tapbreak_best > 0u) {
