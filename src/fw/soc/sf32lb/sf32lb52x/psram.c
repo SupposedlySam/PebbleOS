@@ -462,6 +462,22 @@ static uint32_t prv_psram_persist_after(uint32_t n) {
   return (base[0] == 0xAAAA1234u) ? 1u : 0u;
 }
 
+// Like prv_psram_persist_after but the intervening accesses are READS (not writes). Discriminates
+// write-commit failure (survives many reads, dies on writes) vs read-recency (array read only returns
+// recently-touched rows -> dies on reads too).
+static uint32_t prv_psram_persist_after_reads(uint32_t n) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  base[0] = 0xAAAA1234u;
+  __DSB();
+  volatile uint32_t sink = 0u;
+  for (uint32_t k = 1; k <= n; k++) {
+    sink += base[k * 4096u];
+    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  (void)sink;
+  return (base[0] == 0xAAAA1234u) ? 1u : 0u;
+}
+
 // ADDRESS-WRAP / row-size finder: for each distance D (words), write distinct values at base[0] and
 // base[D] and read BOTH back. base[0] is read AFTER writing base[D] (different address), so a 1-deep
 // write buffer can't fake it. The smallest D where they stop being independent reveals address wrap
@@ -667,27 +683,16 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -104: the HBPSRAM init branch OMITS HAL_MPI_SET_FIXLAT (every other PSRAM branch calls it to
-    // reconcile the device CR0 fixed latency with the controller HRCCR/HWCCR DCYC). So our controller
-    // read/write latency (ecc_en-1 / buf_mode-1 = 4) may not match the device's CR0 latency (code 14
-    // fixed) -> writes FIFO-forward but don't commit (a value survives exactly ONE cross-row write,
-    // -103: n1=1,n2=0). Sweep the controller DCYC (read+write together) and watch write-persistence:
-    // the X where a value survives 8 cross-row writes is the latency the device actually wants.
-    {
-      char r[128];
-      int off = 0;
-      off += sniprintf(r + off, sizeof(r) - off, "psram DCYCSWEEP persist8:");
-      static const uint8_t xs[] = {3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 12u, 14u, 16u};
-      for (unsigned i = 0; i < sizeof(xs) / sizeof(xs[0]); i++) {
-        HAL_FLASH_CFG_AHB_RCMD(&s_psram_handle, 7, (int8_t)xs[i], 0, 7, 3, 7, 7);
-        HAL_FLASH_CFG_AHB_WCMD(&s_psram_handle, 7, (int8_t)xs[i], 0, 7, 3, 7, 7);
-        __DSB();
-        uint32_t p = prv_psram_persist_after(8u);
-        off += sniprintf(r + off, sizeof(r) - off, " x%u=%u", (unsigned)xs[i], (unsigned)p);
-        prompt_watchdog_feed();
-      }
-      emit(r);
-    }
+    // -105 DISCRIMINATE write-commit vs read-recency: -104 ruled out latency (no DCYC fixes persist).
+    // Does base[0] die from intervening WRITES (write-commit broken) or also from intervening READS
+    // (array read only returns recently-touched rows)? Compare the two thresholds directly.
+    sniprintf(buf, sizeof(buf),
+              "psram WvsR write-survive: w1=%u w2=%u w4=%u | read-survive: r1=%u r2=%u r4=%u r8=%u r16=%u",
+              (unsigned)prv_psram_persist_after(1u), (unsigned)prv_psram_persist_after(2u),
+              (unsigned)prv_psram_persist_after(4u), (unsigned)prv_psram_persist_after_reads(1u),
+              (unsigned)prv_psram_persist_after_reads(2u), (unsigned)prv_psram_persist_after_reads(4u),
+              (unsigned)prv_psram_persist_after_reads(8u), (unsigned)prv_psram_persist_after_reads(16u));
+    emit(buf);
     (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
