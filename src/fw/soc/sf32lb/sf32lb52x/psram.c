@@ -431,13 +431,35 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     sniprintf(buf, sizeof(buf), "psram FAST HB: ID0=0x%04x CR0=0x%04x CR1=0x%04x",
               (unsigned)id0, (unsigned)cr0, (unsigned)cr1);
     emit(buf);
-    uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 256u * 1024u);
-    uint32_t uc = prv_psram_usable_at(0x10000000u, 256u * 1024u);
-    sniprintf(buf, sizeof(buf), "psram FAST USABLE: SBUS=%uB CBUS=%uB (largest sustained round-trip)",
-              (unsigned)us, (unsigned)uc);
+    uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+    sniprintf(buf, sizeof(buf), "psram FAST USABLE (cal tap): SBUS=%uB", (unsigned)us);
     emit(buf);
-    s_psram_ready = (us > 0u || uc > 0u);
-    return;  // skip the long tap sweep + 64KB taptest (they drop the session + print 0/16384 anyway)
+    // The 8B break could be a bad (uncentered) strobe tap. Sweep SCK x DQS and, at each tap, measure
+    // the largest sustained round-trip. If SOME tap sustains a long burst -> it's the tap (use it);
+    // if EVERY tap caps near 8B -> the memory-mapped burst itself is limited (need DMA).
+    uint8_t best_sck = 0u, best_dqs = 0u;
+    uint32_t best_break = 0u;
+    static const uint8_t scks[] = {0u, 1u, 2u, 4u, 8u, 16u, 32u, 64u};
+    for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
+      HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
+      for (uint32_t d = 0u; d <= 224u; d += 32u) {
+        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
+        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+        if (b > best_break) {
+          best_break = b;
+          best_sck = scks[si];
+          best_dqs = (uint8_t)d;
+        }
+      }
+      prompt_watchdog_feed();
+    }
+    sniprintf(buf, sizeof(buf), "psram TAP-BREAK best: sck=%u dqs=%u break=%uB",
+              (unsigned)best_sck, (unsigned)best_dqs, (unsigned)best_break);
+    emit(buf);
+    HAL_MPI_SET_SCK(&s_psram_handle, best_sck, 0);
+    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+    s_psram_ready = (best_break > 0u);
+    return;  // skip the old long tap sweep + 64KB taptest below
   }
 
   // THE FIX: re-derive the read strobe. The HAL auto-cal left an off-center SCK/DQS tap;
