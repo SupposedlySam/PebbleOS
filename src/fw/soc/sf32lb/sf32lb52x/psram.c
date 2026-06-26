@@ -518,34 +518,35 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // test). Sweep SCK x DQS measuring the CACHED CBUS multi-line read (the actual failure mode) at
     // RBSIZE=2, FIXED latency. Find a tap where back-to-back cache lines survive -> CBUS off 32B.
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    // -97: size CSLMAX for the HOT-die tCSM (~1us), not the cold 4us the HAL assumes. A sealed active
-    // watch SoC runs hot; HAL's CSLMAX=950 holds CS# ~4x past a 1us tCSM -> refresh missed -> reads
-    // collapse (fits "cold boot works, warm boot 0B"). CSLMAX ~240 cy => ~1us @ the controller clock.
-    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 240u, 3u, 14u);
-    uint8_t best_sck = 0u, best_dqs = 0u;
+    // -98 REGIME CHANGE: reads are marginal AT SPEED (72MHz) -- 0B some boots, 1KB others, cached
+    // never works, no tap/CS-timing knob stabilizes it. Drop the controller SCK hard via PSCLR (the
+    // clock divider): PSCLR 1=72MHz, 2=36, 4=18, 8=9, 16=4.5MHz. A wide per-bit window makes the
+    // off-center tap stop mattering -> reliable reads. Slow-but-correct PSRAM wins (correctness now,
+    // speed later). Measure CBUS (cached/heap) + SBUS at each; find the slowest that works.
     uint32_t best_cb = 0u;
-    static const uint8_t scks[] = {0u, 16u, 32u, 48u};
-    for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
-      HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
-      for (uint32_t d = 0u; d <= 56u; d += 8u) {
-        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        uint32_t cb = prv_psram_cbus_break(4u * 1024u);  // CACHED back-to-back metric (single flush)
-        if (cb > best_cb) {
-          best_cb = cb;
-          best_sck = scks[si];
-          best_dqs = (uint8_t)d;
-        }
+    uint32_t best_psclr = 1u;
+    static const uint32_t psclrs[] = {2u, 4u, 8u, 16u};
+    for (unsigned pi = 0; pi < sizeof(psclrs) / sizeof(psclrs[0]); pi++) {
+      s_psram_handle.Instance->PSCLR = psclrs[pi];
+      __DSB();
+      uint32_t cb = prv_psram_cbus_break(8u * 1024u);
+      uint32_t sb = prv_psram_usable_at(PSRAM_TEST_BASE, 8u * 1024u);
+      sniprintf(buf, sizeof(buf), "psram PSCLR=%u CBUS=%uB SBUS=%uB", (unsigned)psclrs[pi],
+                (unsigned)cb, (unsigned)sb);
+      emit(buf);
+      if (cb > best_cb) {
+        best_cb = cb;
+        best_psclr = psclrs[pi];
       }
       prompt_watchdog_feed();
     }
     s_tapbreak_best = best_cb;
-    s_tapbreak_sck = best_sck;
-    s_tapbreak_dqs = best_dqs;
-    sniprintf(buf, sizeof(buf), "psram CBUS-TAP best: sck=%u dqs=%u CBUS=%uB", (unsigned)best_sck,
-              (unsigned)best_dqs, (unsigned)best_cb);
+    s_tapbreak_sck = (uint8_t)best_psclr;
+    s_tapbreak_dqs = 0u;
+    sniprintf(buf, sizeof(buf), "psram PSCLR best: psclr=%u CBUS=%uB", (unsigned)best_psclr,
+              (unsigned)best_cb);
     emit(buf);
-    HAL_MPI_SET_SCK(&s_psram_handle, best_sck, 0);
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+    s_psram_handle.Instance->PSCLR = best_psclr;
     s_psram_ready = (best_cb >= 64u * 1024u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
