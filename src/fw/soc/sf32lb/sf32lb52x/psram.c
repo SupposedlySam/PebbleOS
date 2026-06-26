@@ -706,32 +706,44 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // half the boots. Fix: after cal, SWEEP RXCLKINV x DQS scored by REAL multi-row survival, keep
     // the winner. Then validate with the dense 256KB scattered (heap-pattern) test and enable the
     // pool. This makes EVERY boot good regardless of which phase DLL2 picked.
+    // -109: -108 proved no READ config (RXCLKINV x DQS) rescues a bad boot -> writes fail on bad
+    // boots (cal only reads, so it still "locks"). Sweep the FULL phase space incl. the WRITE/clock
+    // phase: SCKINV x RXCLKINV x SCK x DQS. Decisive: finds a working config or proves none exists.
     {
-      uint8_t best_inv = 0u, best_dqs = 32u;
+      uint8_t b_si = 0u, b_ri = 0u, b_sck = 35u, b_dqs = 32u;
       uint32_t best = 0u;
-      for (int inv = 0; inv < 2 && best < 16u; inv++) {
-        if (inv) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
-        else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
-        __DSB();
-        for (uint32_t d = 8u; d <= 56u; d += 4u) {
-          HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-          __DSB();
-          uint32_t s = prv_psram_multirow_survive(16u);
-          if (s > best) { best = s; best_inv = (uint8_t)inv; best_dqs = (uint8_t)d; }
-          prompt_watchdog_feed();
-          if (best >= 16u) break;
+      static const uint8_t scks[] = {19u, 35u, 51u};
+      static const uint8_t dqss[] = {16u, 24u, 32u, 40u, 48u};
+      for (int si = 0; si < 2 && best < 16u; si++) {
+        for (int ri = 0; ri < 2 && best < 16u; ri++) {
+          if (ri) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
+          else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
+          for (unsigned ks = 0; ks < sizeof(scks) / sizeof(scks[0]) && best < 16u; ks++) {
+            HAL_MPI_SET_SCK(&s_psram_handle, scks[ks], (uint8_t)si);
+            for (unsigned kd = 0; kd < sizeof(dqss) / sizeof(dqss[0]); kd++) {
+              HAL_MPI_SET_DQS_DELAY(&s_psram_handle, dqss[kd]);
+              __DSB();
+              uint32_t s = prv_psram_multirow_survive(16u);
+              if (s > best) {
+                best = s; b_si = (uint8_t)si; b_ri = (uint8_t)ri; b_sck = scks[ks]; b_dqs = dqss[kd];
+              }
+              prompt_watchdog_feed();
+              if (best >= 16u) break;
+            }
+          }
         }
       }
-      // re-apply the winning phase + tap
-      if (best_inv) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
+      // re-apply the winning config
+      if (b_ri) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
       else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
-      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+      HAL_MPI_SET_SCK(&s_psram_handle, b_sck, b_si);
+      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, b_dqs);
       __DSB();
-      uint32_t rerr = prv_psram_random_test(256u * 1024u, 4000u, 0);
+      uint32_t rerr = (best >= 16u) ? prv_psram_random_test(256u * 1024u, 4000u, 0) : 9999u;
       sniprintf(buf, sizeof(buf),
-                "psram SELFHEAL: best=%u/16 inv=%u dqs=%u  random4000-sep-errs=%u  ready=%u",
-                (unsigned)best, (unsigned)best_inv, (unsigned)best_dqs, (unsigned)rerr,
-                (unsigned)(best >= 16u && rerr == 0u));
+                "psram SELFHEAL2: best=%u/16 sckinv=%u rxinv=%u sck=%u dqs=%u  rand-errs=%u ready=%u",
+                (unsigned)best, (unsigned)b_si, (unsigned)b_ri, (unsigned)b_sck, (unsigned)b_dqs,
+                (unsigned)rerr, (unsigned)(best >= 16u && rerr == 0u));
       emit(buf);
       s_psram_ready = (best >= 16u && rerr == 0u);
     }
