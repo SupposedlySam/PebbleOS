@@ -388,6 +388,14 @@ uint32_t sf32lb52_psram_size(void) {
 //! above prv_psram_init so the bring-up can emit per-step markers via the same sink.
 static void prv_emit_console(const char *line) { prompt_send_response(line); }
 
+// Persist the tap-break sweep result so the diag emits it FIRST on the NEXT psram call. The
+// NO_ENCRYPT console session drops ~3s after connect -- often before a long sweep's result ships.
+// Emitting last run's result up front guarantees observability over the flaky link (fire psram 2
+// twice: run 1 computes, run 2 reports it first then recomputes).
+static uint32_t s_tapbreak_best;  // bytes; 0 = not yet swept
+static uint8_t s_tapbreak_sck;
+static uint8_t s_tapbreak_dqs;
+
 //! Bring the controller up ONCE (idempotent + crash-safe to re-run; re-init would
 //! hang), run the partition-the-failure diagnostic + a write/read test, and emit each
 //! line via `emit`. Sets s_psram_ready on a passing test. The HBPSRAM path auto-
@@ -410,6 +418,14 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   emit(buf);
   if (res != HAL_OK) {
     return;
+  }
+
+  // Emit LAST run's tap-break sweep result FIRST -- guaranteed to ship before the ~3s session drop,
+  // even when this run's sweep (below) gets cut off. Fire `psram 2` twice to read it.
+  if (s_tapbreak_best > 0u) {
+    sniprintf(buf, sizeof(buf), "psram TAP-BREAK (prev run): sck=%u dqs=%u break=%uB",
+              (unsigned)s_tapbreak_sck, (unsigned)s_tapbreak_dqs, (unsigned)s_tapbreak_best);
+    emit(buf);
   }
 
   // === FAST DIAGNOSTIC (ships before the BLE session drops) ===
@@ -439,12 +455,15 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // if EVERY tap caps near 8B -> the memory-mapped burst itself is limited (need DMA).
     uint8_t best_sck = 0u, best_dqs = 0u;
     uint32_t best_break = 0u;
-    static const uint8_t scks[] = {0u, 1u, 2u, 4u, 8u, 16u, 32u, 64u};
+    // Coarse 4x4 grid, probe capped at 2KB, so the whole sweep finishes inside the ~3s NO_ENCRYPT
+    // session window (the 8x8 / 64KB version never shipped its result before the drop). 2KB is
+    // already 256x the 8B break -- if any tap reaches it, that's a clear win worth refining.
+    static const uint8_t scks[] = {0u, 2u, 8u, 32u};
     for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
       HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
-      for (uint32_t d = 0u; d <= 224u; d += 32u) {
+      for (uint32_t d = 0u; d <= 192u; d += 64u) {
         HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 2u * 1024u);
         if (b > best_break) {
           best_break = b;
           best_sck = scks[si];
@@ -453,6 +472,9 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       }
       prompt_watchdog_feed();
     }
+    s_tapbreak_best = best_break;  // persist so the NEXT psram call can emit it first (beats the drop)
+    s_tapbreak_sck = best_sck;
+    s_tapbreak_dqs = best_dqs;
     sniprintf(buf, sizeof(buf), "psram TAP-BREAK best: sck=%u dqs=%u break=%uB",
               (unsigned)best_sck, (unsigned)best_dqs, (unsigned)best_break);
     emit(buf);
