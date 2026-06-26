@@ -373,6 +373,26 @@ static uint32_t prv_psram_usable_bytes(void) {
   return prv_psram_usable_at(PSRAM_TEST_BASE, SF32LB52_PSRAM_SIZE);
 }
 
+// Single-flush CACHED break-finder: write `max_bytes` to the CBUS (cached) port, clean+invalidate
+// the D-cache ONCE, then read back and return the byte offset of the first mismatch (== max_bytes if
+// all OK). One flush + early-exit read makes it far faster than the doubling probe, so a full
+// SCK/DQS sweep using the cached (back-to-back cache-line) metric fits the flaky console session.
+static uint32_t prv_psram_cbus_break(uint32_t max_bytes) {
+  volatile uint32_t *base = (volatile uint32_t *)0x10000000u;
+  const uint32_t words = max_bytes / 4u;
+  for (uint32_t i = 0; i < words; i++) {
+    base[i] = 0x5A5A0000u ^ i;
+  }
+  __DSB();
+  SCB_CleanInvalidateDCache();
+  for (uint32_t i = 0; i < words; i++) {
+    if (base[i] != (0x5A5A0000u ^ i)) {
+      return i * 4u;
+    }
+  }
+  return max_bytes;
+}
+
 uint32_t sf32lb52_psram_size(void) {
   static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
   if (!s_psram_ready) {
@@ -508,7 +528,7 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
       for (uint32_t d = 0u; d <= 56u; d += 8u) {
         HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        uint32_t cb = prv_psram_usable_at(0x10000000u, 16u * 1024u);  // CACHED back-to-back metric
+        uint32_t cb = prv_psram_cbus_break(4u * 1024u);  // CACHED back-to-back metric (single flush)
         if (cb > best_cb) {
           best_cb = cb;
           best_sck = scks[si];
