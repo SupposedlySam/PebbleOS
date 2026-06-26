@@ -455,15 +455,16 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // if EVERY tap caps near 8B -> the memory-mapped burst itself is limited (need DMA).
     uint8_t best_sck = 0u, best_dqs = 0u;
     uint32_t best_break = 0u;
-    // Coarse 4x4 grid, probe capped at 2KB, so the whole sweep finishes inside the ~3s NO_ENCRYPT
-    // session window (the 8x8 / 64KB version never shipped its result before the drop). 2KB is
-    // already 256x the 8B break -- if any tap reaches it, that's a clear win worth refining.
-    static const uint8_t scks[] = {0u, 2u, 8u, 32u};
+    // FINE grid centered on the cal's tap (it lands ~sck=35,dqs=32 and reads ~tens of bytes there;
+    // the coarse grid missed dqs=32 entirely and saw 0B). Sweep tightly around it to find the MAX
+    // achievable burst. If even the best neighbor caps at tens-hundreds of bytes -> hard burst-length
+    // limit (mechanism -> DMA). If a tap suddenly reaches KB -> it was just an off-center tap.
+    static const uint8_t scks[] = {24u, 32u, 40u, 48u};
     for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
       HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
-      for (uint32_t d = 0u; d <= 192u; d += 64u) {
+      for (uint32_t d = 24u; d <= 44u; d += 4u) {  // fine around the cal's dqs~32
         HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 2u * 1024u);
+        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 4u * 1024u);
         if (b > best_break) {
           best_break = b;
           best_sck = scks[si];
