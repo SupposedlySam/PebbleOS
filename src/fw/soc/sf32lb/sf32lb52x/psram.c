@@ -433,6 +433,40 @@ static uint32_t prv_psram_random_test(uint32_t span_bytes, uint32_t n, int inter
   return errs;
 }
 
+// ALIASING discriminator: write 16 distinct values at 16KB-spaced (4096-word) offsets across 256KB,
+// read straight back (minimal time, so retention is NOT a factor). errs>0 => far-apart addresses
+// collide => the array aliases (upper address lines unmapped / wrong row-size config), not retention.
+static uint32_t prv_psram_alias_errs(void) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  for (uint32_t s = 0; s < 16u; s++) base[s * 4096u] = 0xA11A0000u ^ s;
+  __DSB();
+  uint32_t errs = 0u;
+  for (uint32_t s = 0; s < 16u; s++) {
+    if (base[s * 4096u] != (0xA11A0000u ^ s)) errs++;
+  }
+  return errs;
+}
+
+// RETENTION discriminator: write 16 markers, burn `spin` empty iterations with NO PSRAM access (so
+// the device, CS# idle-high, should self-refresh), then read back. errs growing with spin => the
+// self-refresh isn't maintaining the array => fix CR1/refresh config.
+static uint32_t prv_psram_retain_errs(uint32_t spin) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  for (uint32_t s = 0; s < 16u; s++) base[s * 4096u] = 0xBEEF0000u ^ s;
+  __DSB();
+  volatile uint32_t acc = 0u;
+  for (uint32_t t = 0; t < spin; t++) {
+    acc += t;
+    if ((t & 0x3ffffu) == 0u) prompt_watchdog_feed();
+  }
+  (void)acc;
+  uint32_t errs = 0u;
+  for (uint32_t s = 0; s < 16u; s++) {
+    if (base[s * 4096u] != (0xBEEF0000u ^ s)) errs++;
+  }
+  return errs;
+}
+
 uint32_t sf32lb52_psram_size(void) {
   static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
   if (!s_psram_ready) {
@@ -563,12 +597,16 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // small reads work. A heap does scattered small accesses -- the working mode. Test that directly
     // over a 256KB UNCACHED SBUS span (>194KB the module needs). If errs==0, the PSRAM is usable as a
     // (slow, uncached) heap and we can point the WAMR/Dart pool at 0x60000000.
-    uint32_t sb_contig = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
-    uint32_t r_sep = prv_psram_random_test(256u * 1024u, 4000u, 0);
+    // -100 DISCRIMINATOR: -99 showed interleave(immediate)=0 errs but separated(write-all-then-read)
+    // =3995 errs. Is it ALIASING (far addresses collide) or RETENTION (data decays over time)?
+    uint32_t al = prv_psram_alias_errs();
+    uint32_t r0 = prv_psram_retain_errs(0u);
+    uint32_t r1 = prv_psram_retain_errs(2000000u);
+    uint32_t r2 = prv_psram_retain_errs(20000000u);
     uint32_t r_int = prv_psram_random_test(256u * 1024u, 4000u, 1);
     sniprintf(buf, sizeof(buf),
-              "psram HEAP-TEST: SBUS-contig=%uB  random/4000 sep-errs=%u  interleave-errs=%u",
-              (unsigned)sb_contig, (unsigned)r_sep, (unsigned)r_int);
+              "psram DISCRIM: alias16=%u retain[0]=%u retain[2M]=%u retain[20M]=%u interleave4000=%u",
+              (unsigned)al, (unsigned)r0, (unsigned)r1, (unsigned)r2, (unsigned)r_int);
     emit(buf);
     s_tapbreak_best = (r_int == 0u) ? (256u * 1024u) : 0u;
     s_psram_ready = (r_int == 0u);
