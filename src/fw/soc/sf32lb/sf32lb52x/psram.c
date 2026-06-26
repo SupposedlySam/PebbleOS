@@ -583,6 +583,10 @@ uint32_t sf32lb52_psram_size(void) {
 //! above prv_psram_init so the bring-up can emit per-step markers via the same sink.
 static void prv_emit_console(const char *line) { prompt_send_response(line); }
 
+//! No-op emit sink: used for re-init retries (-110) so the bring-up's per-step markers don't flood
+//! the flaky NO_ENCRYPT console session; only the final summary line is emitted.
+static void prv_emit_quiet(const char *line) { (void)line; }
+
 // Persist the tap-break sweep result so the diag emits it FIRST on the NEXT psram call. The
 // NO_ENCRYPT console session drops ~3s after connect -- often before a long sweep's result ships.
 // Emitting last run's result up front guarantees observability over the flaky link (fire psram 2
@@ -706,44 +710,23 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // half the boots. Fix: after cal, SWEEP RXCLKINV x DQS scored by REAL multi-row survival, keep
     // the winner. Then validate with the dense 256KB scattered (heap-pattern) test and enable the
     // pool. This makes EVERY boot good regardless of which phase DLL2 picked.
-    // -109: -108 proved no READ config (RXCLKINV x DQS) rescues a bad boot -> writes fail on bad
-    // boots (cal only reads, so it still "locks"). Sweep the FULL phase space incl. the WRITE/clock
-    // phase: SCKINV x RXCLKINV x SCK x DQS. Decisive: finds a working config or proves none exists.
+    // -110: -109 proved a bad boot has NO working timing config (full phase space = 0/16) -> it's not
+    // a tap/phase, the INIT/clock/wake came up bad this boot. Test re-init retry: re-run the full init
+    // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
+    // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      uint8_t b_si = 0u, b_ri = 0u, b_sck = 35u, b_dqs = 32u;
-      uint32_t best = 0u;
-      static const uint8_t scks[] = {19u, 35u, 51u};
-      static const uint8_t dqss[] = {16u, 24u, 32u, 40u, 48u};
-      for (int si = 0; si < 2 && best < 16u; si++) {
-        for (int ri = 0; ri < 2 && best < 16u; ri++) {
-          if (ri) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
-          else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
-          for (unsigned ks = 0; ks < sizeof(scks) / sizeof(scks[0]) && best < 16u; ks++) {
-            HAL_MPI_SET_SCK(&s_psram_handle, scks[ks], (uint8_t)si);
-            for (unsigned kd = 0; kd < sizeof(dqss) / sizeof(dqss[0]); kd++) {
-              HAL_MPI_SET_DQS_DELAY(&s_psram_handle, dqss[kd]);
-              __DSB();
-              uint32_t s = prv_psram_multirow_survive(16u);
-              if (s > best) {
-                best = s; b_si = (uint8_t)si; b_ri = (uint8_t)ri; b_sck = scks[ks]; b_dqs = dqss[kd];
-              }
-              prompt_watchdog_feed();
-              if (best >= 16u) break;
-            }
-          }
-        }
+      uint32_t best = prv_psram_multirow_survive(16u);
+      uint32_t tries = 0u;
+      while (best < 16u && tries < 5u) {
+        tries++;
+        (void)prv_psram_init(div, prv_emit_quiet);
+        best = prv_psram_multirow_survive(16u);
+        prompt_watchdog_feed();
       }
-      // re-apply the winning config
-      if (b_ri) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
-      else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
-      HAL_MPI_SET_SCK(&s_psram_handle, b_sck, b_si);
-      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, b_dqs);
-      __DSB();
       uint32_t rerr = (best >= 16u) ? prv_psram_random_test(256u * 1024u, 4000u, 0) : 9999u;
-      sniprintf(buf, sizeof(buf),
-                "psram SELFHEAL2: best=%u/16 sckinv=%u rxinv=%u sck=%u dqs=%u  rand-errs=%u ready=%u",
-                (unsigned)best, (unsigned)b_si, (unsigned)b_ri, (unsigned)b_sck, (unsigned)b_dqs,
-                (unsigned)rerr, (unsigned)(best >= 16u && rerr == 0u));
+      sniprintf(buf, sizeof(buf), "psram REINIT: tries=%u best=%u/16 rand-errs=%u ready=%u",
+                (unsigned)tries, (unsigned)best, (unsigned)rerr,
+                (unsigned)(best >= 16u && rerr == 0u));
       emit(buf);
       s_psram_ready = (best >= 16u && rerr == 0u);
     }
