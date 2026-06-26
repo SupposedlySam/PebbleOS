@@ -518,6 +518,10 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // test). Sweep SCK x DQS measuring the CACHED CBUS multi-line read (the actual failure mode) at
     // RBSIZE=2, FIXED latency. Find a tap where back-to-back cache lines survive -> CBUS off 32B.
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
+    // -97: size CSLMAX for the HOT-die tCSM (~1us), not the cold 4us the HAL assumes. A sealed active
+    // watch SoC runs hot; HAL's CSLMAX=950 holds CS# ~4x past a 1us tCSM -> refresh missed -> reads
+    // collapse (fits "cold boot works, warm boot 0B"). CSLMAX ~240 cy => ~1us @ the controller clock.
+    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 240u, 3u, 14u);
     uint8_t best_sck = 0u, best_dqs = 0u;
     uint32_t best_cb = 0u;
     static const uint8_t scks[] = {0u, 16u, 32u, 48u};
