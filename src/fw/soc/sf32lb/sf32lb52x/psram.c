@@ -474,26 +474,32 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // capture goes bad after a few bytes. Shrink RBSIZE so CS# drops + the read command re-issues
     // every few bytes (RBSIZE=0 -> 8-byte bursts = our working size). Keep the cal's SCK/DQS tap.
     // Per-RBSIZE lines ship incrementally; the best is persisted + emitted first next call.
-    uint8_t best_rb = 7u;
+    // -90: RBSIZE 0-2 took us 32B -> 512B (16x); now a 512B plateau == the ~tCSM (4us) refresh window
+    // (CSLMAX=950 cy ~6.6us > tCSM, so CS# is held past the refresh deadline). Pin a small RBSIZE and
+    // sweep CSLMAX DOWN so CS# drops within tCSM -- should push the break past 512B. Other CS-time
+    // fields kept at the dumped baseline (cslmin=6, cshmin=3, trcmin=14). Verified setter SET_CS_TIME.
+    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
     uint32_t best_break = 0u;
-    for (uint8_t rb = 0u; rb <= 7u; rb++) {
-      HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, rb);
-      uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 16u * 1024u);
-      sniprintf(buf, sizeof(buf), "psram RBSIZE=%u break=%uB", (unsigned)rb, (unsigned)b);
+    uint16_t best_cslmax = 950u;
+    static const uint16_t cslmaxes[] = {950u, 600u, 450u, 300u, 200u, 100u};
+    for (unsigned ci = 0; ci < sizeof(cslmaxes) / sizeof(cslmaxes[0]); ci++) {
+      HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, cslmaxes[ci], 3u, 14u);
+      uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+      sniprintf(buf, sizeof(buf), "psram CSLMAX=%u break=%uB", (unsigned)cslmaxes[ci], (unsigned)b);
       emit(buf);
       if (b > best_break) {
         best_break = b;
-        best_rb = rb;
+        best_cslmax = cslmaxes[ci];
       }
       prompt_watchdog_feed();
     }
-    s_tapbreak_best = best_break;  // persist (reuse: sck field carries the best RBSIZE)
-    s_tapbreak_sck = best_rb;
+    s_tapbreak_best = best_break;  // persist (sck field carries best CSLMAX/16 for emit-first)
+    s_tapbreak_sck = (uint8_t)(best_cslmax / 16u);
     s_tapbreak_dqs = 0u;
-    sniprintf(buf, sizeof(buf), "psram RBSIZE best: rb=%u break=%uB", (unsigned)best_rb,
-              (unsigned)best_break);
+    sniprintf(buf, sizeof(buf), "psram CSLMAX best: cslmax=%u break=%uB (RBSIZE=2)",
+              (unsigned)best_cslmax, (unsigned)best_break);
     emit(buf);
-    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, best_rb);
+    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, best_cslmax, 3u, 14u);
     s_psram_ready = (best_break > 0u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
