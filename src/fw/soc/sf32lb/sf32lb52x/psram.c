@@ -701,32 +701,47 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -107 RXCLKINV PHASE TEST (agent traced it in the HAL): the read-capture clock phase = MISCR
-    // bit 24 (RXCLKINV) + RXCLKDLY[7:0]. The cal tunes only SCK/DQS DELAY and NEVER sets RXCLKINV --
-    // it's left at reset and ASSUMES a fixed capture phase. DLL2 has no phase control (only a binary
-    // READY), so it comes up on either phase ~50/50 per boot -> on the wrong-phase boot the cal still
-    // locks but every read is wrong = our binary per-boot window open/close. Flip RXCLKINV and re-test:
-    // on a bad boot survival should swing 0 -> 16. If so, the fix is a boot-time read-back + RXCLKINV
-    // self-heal. Test current phase, flip, test, so one flash shows it regardless of which boot we got.
+    // -108 SELF-HEAL: the per-boot binary failure is the read-capture phase the cal never sets
+    // (MISCR.RXCLKINV) plus DQS. DLL2 comes up on either phase ~50/50, so a fixed config works only
+    // half the boots. Fix: after cal, SWEEP RXCLKINV x DQS scored by REAL multi-row survival, keep
+    // the winner. Then validate with the dense 256KB scattered (heap-pattern) test and enable the
+    // pool. This makes EVERY boot good regardless of which phase DLL2 picked.
     {
-      uint32_t s0 = prv_psram_multirow_survive(16u);
-      s_psram_handle.Instance->MISCR ^= MPI_MISCR_RXCLKINV_Msk;
+      uint8_t best_inv = 0u, best_dqs = 32u;
+      uint32_t best = 0u;
+      for (int inv = 0; inv < 2 && best < 16u; inv++) {
+        if (inv) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
+        else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
+        __DSB();
+        for (uint32_t d = 8u; d <= 56u; d += 4u) {
+          HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
+          __DSB();
+          uint32_t s = prv_psram_multirow_survive(16u);
+          if (s > best) { best = s; best_inv = (uint8_t)inv; best_dqs = (uint8_t)d; }
+          prompt_watchdog_feed();
+          if (best >= 16u) break;
+        }
+      }
+      // re-apply the winning phase + tap
+      if (best_inv) s_psram_handle.Instance->MISCR |= MPI_MISCR_RXCLKINV_Msk;
+      else s_psram_handle.Instance->MISCR &= ~MPI_MISCR_RXCLKINV_Msk;
+      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
       __DSB();
-      uint32_t s1 = prv_psram_multirow_survive(16u);
-      uint32_t mi = s_psram_handle.Instance->MISCR;
-      sniprintf(buf, sizeof(buf), "psram RXCLKINV: surv[init]=%u/16 surv[flip]=%u/16 MISCR=0x%08x",
-                (unsigned)s0, (unsigned)s1, (unsigned)mi);
+      uint32_t rerr = prv_psram_random_test(256u * 1024u, 4000u, 0);
+      sniprintf(buf, sizeof(buf),
+                "psram SELFHEAL: best=%u/16 inv=%u dqs=%u  random4000-sep-errs=%u  ready=%u",
+                (unsigned)best, (unsigned)best_inv, (unsigned)best_dqs, (unsigned)rerr,
+                (unsigned)(best >= 16u && rerr == 0u));
       emit(buf);
+      s_psram_ready = (best >= 16u && rerr == 0u);
     }
     (void)prv_psram_persist_after;
     (void)prv_psram_persist_after_reads;
     (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
-    (void)prv_psram_random_test;
     (void)prv_psram_gapped_retain;
-    s_psram_ready = false;
-    return;  // skip the old long tap sweep + 64KB taptest below
+    return;  // -108 owns s_psram_ready; skip the old tap sweep/taptest below
   }
 
   // THE FIX: re-derive the read strobe. The HAL auto-cal left an off-center SCK/DQS tap;
