@@ -338,7 +338,7 @@ bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 static uint32_t prv_psram_usable_at(uint32_t base_addr, uint32_t max_sz) {
   volatile uint32_t *base = (volatile uint32_t *)base_addr;
   uint32_t usable = 0u;
-  for (uint32_t sz = 1024u; sz <= max_sz; sz <<= 1) {
+  for (uint32_t sz = 8u; sz <= max_sz; sz <<= 1) {  // start at 8B (2 words) to find the exact single->bulk break
     const uint32_t words = sz / 4u;
     for (uint32_t i = 0; i < words; i++) {
       base[i] = 0x5A5A0000u ^ i;
@@ -433,8 +433,8 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     emit(buf);
     uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 256u * 1024u);
     uint32_t uc = prv_psram_usable_at(0x10000000u, 256u * 1024u);
-    sniprintf(buf, sizeof(buf), "psram FAST USABLE: SBUS=%uKB CBUS=%uKB (of 256KB)",
-              (unsigned)(us / 1024u), (unsigned)(uc / 1024u));
+    sniprintf(buf, sizeof(buf), "psram FAST USABLE: SBUS=%uB CBUS=%uB (largest sustained round-trip)",
+              (unsigned)us, (unsigned)uc);
     emit(buf);
     s_psram_ready = (us > 0u || uc > 0u);
     return;  // skip the long tap sweep + 64KB taptest (they drop the session + print 0/16384 anyway)
