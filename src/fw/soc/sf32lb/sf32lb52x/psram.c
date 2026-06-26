@@ -377,7 +377,7 @@ static uint32_t prv_psram_usable_bytes(void) {
 // the D-cache ONCE, then read back and return the byte offset of the first mismatch (== max_bytes if
 // all OK). One flush + early-exit read makes it far faster than the doubling probe, so a full
 // SCK/DQS sweep using the cached (back-to-back cache-line) metric fits the flaky console session.
-static uint32_t prv_psram_cbus_break(uint32_t max_bytes) {
+__attribute__((unused)) static uint32_t prv_psram_cbus_break(uint32_t max_bytes) {
   volatile uint32_t *base = (volatile uint32_t *)0x10000000u;
   const uint32_t words = max_bytes / 4u;
   for (uint32_t i = 0; i < words; i++) {
@@ -391,6 +391,46 @@ static uint32_t prv_psram_cbus_break(uint32_t max_bytes) {
     }
   }
   return max_bytes;
+}
+
+// HEAP-PATTERN test: scattered small (4B) accesses over a large UNCACHED SBUS span -- the access mode
+// a WAMR/Dart heap actually uses (NOT the sustained/consecutive bursts that fail). Each access is its
+// own short CS#-low transaction with CS#-high gaps between (so the device self-refreshes). Returns the
+// number of mismatches out of `n` scattered accesses. 0 => the PSRAM is usable as a heap (slow but
+// correct), even though contiguous bursts cap at ~1KB. `interleave`=write+read each access in turn
+// (true heap pattern), else write-all-then-read-all (also checks retention/self-refresh).
+static uint32_t prv_psram_random_test(uint32_t span_bytes, uint32_t n, int interleave) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  const uint32_t words = span_bytes / 4u;
+  uint32_t errs = 0u;
+  if (interleave) {
+    uint32_t lcg = 0x1234567u;
+    for (uint32_t k = 0; k < n; k++) {
+      lcg = lcg * 1103515245u + 12345u;
+      uint32_t idx = (lcg >> 8) % words;
+      base[idx] = 0xC0DE0000u ^ idx;
+      __DSB();
+      if (base[idx] != (0xC0DE0000u ^ idx)) errs++;
+      if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
+    }
+    return errs;
+  }
+  uint32_t lcg = 0x1234567u;
+  for (uint32_t k = 0; k < n; k++) {
+    lcg = lcg * 1103515245u + 12345u;
+    uint32_t idx = (lcg >> 8) % words;
+    base[idx] = 0xC0DE0000u ^ idx;  // value is a pure fn of idx, so write collisions are harmless
+    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  __DSB();
+  lcg = 0x1234567u;
+  for (uint32_t k = 0; k < n; k++) {
+    lcg = lcg * 1103515245u + 12345u;
+    uint32_t idx = (lcg >> 8) % words;
+    if (base[idx] != (0xC0DE0000u ^ idx)) errs++;
+    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  return errs;
 }
 
 uint32_t sf32lb52_psram_size(void) {
@@ -518,36 +558,20 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // test). Sweep SCK x DQS measuring the CACHED CBUS multi-line read (the actual failure mode) at
     // RBSIZE=2, FIXED latency. Find a tap where back-to-back cache lines survive -> CBUS off 32B.
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    // -98 REGIME CHANGE: reads are marginal AT SPEED (72MHz) -- 0B some boots, 1KB others, cached
-    // never works, no tap/CS-timing knob stabilizes it. Drop the controller SCK hard via PSCLR (the
-    // clock divider): PSCLR 1=72MHz, 2=36, 4=18, 8=9, 16=4.5MHz. A wide per-bit window makes the
-    // off-center tap stop mattering -> reliable reads. Slow-but-correct PSRAM wins (correctness now,
-    // speed later). Measure CBUS (cached/heap) + SBUS at each; find the slowest that works.
-    uint32_t best_cb = 0u;
-    uint32_t best_psclr = 1u;
-    static const uint32_t psclrs[] = {2u, 4u, 8u, 16u};
-    for (unsigned pi = 0; pi < sizeof(psclrs) / sizeof(psclrs[0]); pi++) {
-      s_psram_handle.Instance->PSCLR = psclrs[pi];
-      __DSB();
-      uint32_t cb = prv_psram_cbus_break(8u * 1024u);
-      uint32_t sb = prv_psram_usable_at(PSRAM_TEST_BASE, 8u * 1024u);
-      sniprintf(buf, sizeof(buf), "psram PSCLR=%u CBUS=%uB SBUS=%uB", (unsigned)psclrs[pi],
-                (unsigned)cb, (unsigned)sb);
-      emit(buf);
-      if (cb > best_cb) {
-        best_cb = cb;
-        best_psclr = psclrs[pi];
-      }
-      prompt_watchdog_feed();
-    }
-    s_tapbreak_best = best_cb;
-    s_tapbreak_sck = (uint8_t)best_psclr;
-    s_tapbreak_dqs = 0u;
-    sniprintf(buf, sizeof(buf), "psram PSCLR best: psclr=%u CBUS=%uB", (unsigned)best_psclr,
-              (unsigned)best_cb);
+    // -99 HEAP-PATTERN test: the clock sweep proved the wall is clock-INDEPENDENT (28B cached, 1KB
+    // SBUS at every PSCLR 2..16). It's structural: SUSTAINED bursts fail after ~1 line, but INDIVIDUAL
+    // small reads work. A heap does scattered small accesses -- the working mode. Test that directly
+    // over a 256KB UNCACHED SBUS span (>194KB the module needs). If errs==0, the PSRAM is usable as a
+    // (slow, uncached) heap and we can point the WAMR/Dart pool at 0x60000000.
+    uint32_t sb_contig = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+    uint32_t r_sep = prv_psram_random_test(256u * 1024u, 4000u, 0);
+    uint32_t r_int = prv_psram_random_test(256u * 1024u, 4000u, 1);
+    sniprintf(buf, sizeof(buf),
+              "psram HEAP-TEST: SBUS-contig=%uB  random/4000 sep-errs=%u  interleave-errs=%u",
+              (unsigned)sb_contig, (unsigned)r_sep, (unsigned)r_int);
     emit(buf);
-    s_psram_handle.Instance->PSCLR = best_psclr;
-    s_psram_ready = (best_cb >= 64u * 1024u);
+    s_tapbreak_best = (r_int == 0u) ? (256u * 1024u) : 0u;
+    s_psram_ready = (r_int == 0u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
