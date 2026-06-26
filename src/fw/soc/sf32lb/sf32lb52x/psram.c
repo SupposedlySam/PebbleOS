@@ -469,37 +469,31 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
     sniprintf(buf, sizeof(buf), "psram FAST USABLE (cal tap): SBUS=%uB", (unsigned)us);
     emit(buf);
-    // The 8B break could be a bad (uncentered) strobe tap. Sweep SCK x DQS and, at each tap, measure
-    // the largest sustained round-trip. If SOME tap sustains a long burst -> it's the tap (use it);
-    // if EVERY tap caps near 8B -> the memory-mapped burst itself is limited (need DMA).
-    uint8_t best_sck = 0u, best_dqs = 0u;
+    // RBSIZE SWEEP (research-backed, verified-register experiment). Live DCR showed RBSIZE=7 (1KB row
+    // boundary) yet reads break at ~8-32B -- so the controller holds CS# low for a long burst whose
+    // capture goes bad after a few bytes. Shrink RBSIZE so CS# drops + the read command re-issues
+    // every few bytes (RBSIZE=0 -> 8-byte bursts = our working size). Keep the cal's SCK/DQS tap.
+    // Per-RBSIZE lines ship incrementally; the best is persisted + emitted first next call.
+    uint8_t best_rb = 7u;
     uint32_t best_break = 0u;
-    // FINE grid centered on the cal's tap (it lands ~sck=35,dqs=32 and reads ~tens of bytes there;
-    // the coarse grid missed dqs=32 entirely and saw 0B). Sweep tightly around it to find the MAX
-    // achievable burst. If even the best neighbor caps at tens-hundreds of bytes -> hard burst-length
-    // limit (mechanism -> DMA). If a tap suddenly reaches KB -> it was just an off-center tap.
-    static const uint8_t scks[] = {24u, 32u, 40u, 48u};
-    for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
-      HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
-      for (uint32_t d = 24u; d <= 44u; d += 4u) {  // fine around the cal's dqs~32
-        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 4u * 1024u);
-        if (b > best_break) {
-          best_break = b;
-          best_sck = scks[si];
-          best_dqs = (uint8_t)d;
-        }
+    for (uint8_t rb = 0u; rb <= 7u; rb++) {
+      HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, rb);
+      uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 16u * 1024u);
+      sniprintf(buf, sizeof(buf), "psram RBSIZE=%u break=%uB", (unsigned)rb, (unsigned)b);
+      emit(buf);
+      if (b > best_break) {
+        best_break = b;
+        best_rb = rb;
       }
       prompt_watchdog_feed();
     }
-    s_tapbreak_best = best_break;  // persist so the NEXT psram call can emit it first (beats the drop)
-    s_tapbreak_sck = best_sck;
-    s_tapbreak_dqs = best_dqs;
-    sniprintf(buf, sizeof(buf), "psram TAP-BREAK best: sck=%u dqs=%u break=%uB",
-              (unsigned)best_sck, (unsigned)best_dqs, (unsigned)best_break);
+    s_tapbreak_best = best_break;  // persist (reuse: sck field carries the best RBSIZE)
+    s_tapbreak_sck = best_rb;
+    s_tapbreak_dqs = 0u;
+    sniprintf(buf, sizeof(buf), "psram RBSIZE best: rb=%u break=%uB", (unsigned)best_rb,
+              (unsigned)best_break);
     emit(buf);
-    HAL_MPI_SET_SCK(&s_psram_handle, best_sck, 0);
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+    HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, best_rb);
     s_psram_ready = (best_break > 0u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
