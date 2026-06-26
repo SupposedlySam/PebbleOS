@@ -483,17 +483,37 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (broken burst); at RBSIZE=2 each line fill should land -> transparent MB-scale bulk for the
     // WAMR heap, sidestepping the contiguous-read ceiling entirely. Set RBSIZE=2 + best CSLMAX(450),
     // then measure BOTH ports up to 256KB (enough for the ~200KB working set).
+    // -92: CBUS=32B (ONE cache line); SBUS >512B only within a single CS#-low burst. So the
+    // CONTINUATION across a CS# drop (back-to-back read recovery) is the wall -- it kills both >512B
+    // contiguous AND the cache's 2nd line. Recovery = CSHMIN (CS#-high, 4-bit max 15) + TRCMIN
+    // (read-cycle, 5-bit max 31). Pin a fixed tap (cut per-boot cal noise) + RBSIZE=2 (force drops) +
+    // sweep CSHMIN UP with TRCMIN maxed; measure CBUS (the heap path). If a value lets cache lines
+    // continue, CBUS jumps from 32B toward MB.
+    HAL_MPI_SET_SCK(&s_psram_handle, 35u, 0);
+    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, 32u);
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 450u, 3u, 14u);
-    uint32_t sb_b = prv_psram_usable_at(PSRAM_TEST_BASE, 256u * 1024u);
-    uint32_t cb_b = prv_psram_usable_at(0x10000000u, 256u * 1024u);
-    sniprintf(buf, sizeof(buf), "psram RB2 USABLE: SBUS=%uB CBUS=%uB (of 256KB)",
-              (unsigned)sb_b, (unsigned)cb_b);
-    emit(buf);
-    s_tapbreak_best = cb_b;  // persist the CBUS (cached/heap) number -- emitted first next call
-    s_tapbreak_sck = 2u;
+    uint32_t best_cb = 0u;
+    uint16_t best_csh = 3u;
+    static const uint16_t cshs[] = {3u, 7u, 11u, 15u};
+    for (unsigned ci = 0; ci < sizeof(cshs) / sizeof(cshs[0]); ci++) {
+      HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 950u, cshs[ci], 31u);  // CSHMIN swept, TRCMIN maxed
+      uint32_t cb = prv_psram_usable_at(0x10000000u, 64u * 1024u);
+      sniprintf(buf, sizeof(buf), "psram CSHMIN=%u CBUS=%uB", (unsigned)cshs[ci], (unsigned)cb);
+      emit(buf);
+      if (cb > best_cb) {
+        best_cb = cb;
+        best_csh = cshs[ci];
+      }
+      prompt_watchdog_feed();
+    }
+    s_tapbreak_best = best_cb;  // persist (sck field carries best CSHMIN) -- emitted first next call
+    s_tapbreak_sck = (uint8_t)best_csh;
     s_tapbreak_dqs = 0u;
-    s_psram_ready = (cb_b >= 64u * 1024u);  // "ready" only if cached bulk gives real space
+    sniprintf(buf, sizeof(buf), "psram CSHMIN best: csh=%u CBUS=%uB", (unsigned)best_csh,
+              (unsigned)best_cb);
+    emit(buf);
+    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 950u, best_csh, 31u);
+    s_psram_ready = (best_cb >= 64u * 1024u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
