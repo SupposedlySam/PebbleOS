@@ -478,29 +478,22 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (CSLMAX=950 cy ~6.6us > tCSM, so CS# is held past the refresh deadline). Pin a small RBSIZE and
     // sweep CSLMAX DOWN so CS# drops within tCSM -- should push the break past 512B. Other CS-time
     // fields kept at the dumped baseline (cslmin=6, cshmin=3, trcmin=14). Verified setter SET_CS_TIME.
+    // -91 KEY RETEST: SBUS contiguous reads cap at ~512B (the tCSM refresh window), but the CBUS
+    // CACHED path fetches 32-byte cache lines -- each far under 512B. CBUS was 0 at the OLD RBSIZE=7
+    // (broken burst); at RBSIZE=2 each line fill should land -> transparent MB-scale bulk for the
+    // WAMR heap, sidestepping the contiguous-read ceiling entirely. Set RBSIZE=2 + best CSLMAX(450),
+    // then measure BOTH ports up to 256KB (enough for the ~200KB working set).
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    uint32_t best_break = 0u;
-    uint16_t best_cslmax = 950u;
-    static const uint16_t cslmaxes[] = {950u, 600u, 450u, 300u, 200u, 100u};
-    for (unsigned ci = 0; ci < sizeof(cslmaxes) / sizeof(cslmaxes[0]); ci++) {
-      HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, cslmaxes[ci], 3u, 14u);
-      uint32_t b = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
-      sniprintf(buf, sizeof(buf), "psram CSLMAX=%u break=%uB", (unsigned)cslmaxes[ci], (unsigned)b);
-      emit(buf);
-      if (b > best_break) {
-        best_break = b;
-        best_cslmax = cslmaxes[ci];
-      }
-      prompt_watchdog_feed();
-    }
-    s_tapbreak_best = best_break;  // persist (sck field carries best CSLMAX/16 for emit-first)
-    s_tapbreak_sck = (uint8_t)(best_cslmax / 16u);
-    s_tapbreak_dqs = 0u;
-    sniprintf(buf, sizeof(buf), "psram CSLMAX best: cslmax=%u break=%uB (RBSIZE=2)",
-              (unsigned)best_cslmax, (unsigned)best_break);
+    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 450u, 3u, 14u);
+    uint32_t sb_b = prv_psram_usable_at(PSRAM_TEST_BASE, 256u * 1024u);
+    uint32_t cb_b = prv_psram_usable_at(0x10000000u, 256u * 1024u);
+    sniprintf(buf, sizeof(buf), "psram RB2 USABLE: SBUS=%uB CBUS=%uB (of 256KB)",
+              (unsigned)sb_b, (unsigned)cb_b);
     emit(buf);
-    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, best_cslmax, 3u, 14u);
-    s_psram_ready = (best_break > 0u);
+    s_tapbreak_best = cb_b;  // persist the CBUS (cached/heap) number -- emitted first next call
+    s_tapbreak_sck = 2u;
+    s_tapbreak_dqs = 0u;
+    s_psram_ready = (cb_b >= 64u * 1024u);  // "ready" only if cached bulk gives real space
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
