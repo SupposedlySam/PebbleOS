@@ -494,20 +494,38 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // refresh extends latency mid-continuation. Try VARIABLE latency -- controller samples RWDS during
     // CA to detect the refresh-extended latency and adjusts. Clear CR0 fixed-latency bit (0xe78f ->
     // 0xe787) + HAL_MPI_EN_FIXLAT(0). If the continuation now survives a refresh, CBUS jumps from 32B.
-    HAL_MPI_SET_SCK(&s_psram_handle, 35u, 0);
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, 32u);
+    // -94 (4-agent research synthesis): REVERT variable latency (it was inconsistent with the fixed
+    // CS-timing). Latency stays FIXED (HAL_MPI_PSRAM_Init set FIXLAT=1 + CR0 fixed). CR1/RXCLKDLY/pins
+    // all RULED OUT by research. The real failure = the read TAP doesn't survive the re-issued read
+    // after a CS# drop (cached 2nd line), and my prior sweeps used a single-burst SBUS metric (WRONG
+    // test). Sweep SCK x DQS measuring the CACHED CBUS multi-line read (the actual failure mode) at
+    // RBSIZE=2, FIXED latency. Find a tap where back-to-back cache lines survive -> CBUS off 32B.
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    HAL_HYPER_PSRAM_WriteCR(&s_psram_handle, 0, 0xe787u);  // CR0: clear fixed-latency bit -> variable
-    HAL_MPI_EN_FIXLAT(&s_psram_handle, 0);                 // controller: variable latency (sample RWDS)
-    uint32_t vc = prv_psram_usable_at(0x10000000u, 256u * 1024u);
-    uint32_t vs = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
-    sniprintf(buf, sizeof(buf), "psram VARLAT USABLE: CBUS=%uB SBUS=%uB (of 256K/64K)",
-              (unsigned)vc, (unsigned)vs);
+    uint8_t best_sck = 0u, best_dqs = 0u;
+    uint32_t best_cb = 0u;
+    static const uint8_t scks[] = {0u, 16u, 32u, 48u};
+    for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]); si++) {
+      HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
+      for (uint32_t d = 0u; d <= 56u; d += 8u) {
+        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
+        uint32_t cb = prv_psram_usable_at(0x10000000u, 16u * 1024u);  // CACHED back-to-back metric
+        if (cb > best_cb) {
+          best_cb = cb;
+          best_sck = scks[si];
+          best_dqs = (uint8_t)d;
+        }
+      }
+      prompt_watchdog_feed();
+    }
+    s_tapbreak_best = best_cb;
+    s_tapbreak_sck = best_sck;
+    s_tapbreak_dqs = best_dqs;
+    sniprintf(buf, sizeof(buf), "psram CBUS-TAP best: sck=%u dqs=%u CBUS=%uB", (unsigned)best_sck,
+              (unsigned)best_dqs, (unsigned)best_cb);
     emit(buf);
-    s_tapbreak_best = vc;  // persist CBUS (heap path) -- emitted first next call
-    s_tapbreak_sck = 0u;
-    s_tapbreak_dqs = 0u;
-    s_psram_ready = (vc >= 64u * 1024u);
+    HAL_MPI_SET_SCK(&s_psram_handle, best_sck, 0);
+    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
+    s_psram_ready = (best_cb >= 64u * 1024u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
