@@ -667,36 +667,27 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -103: two code-grounded questions in one flash. (1) Does the read-strobe cal actually LOCK?
-    // Replicate the HAL CAL_DELAY probe but watch DONE directly (the HAL reads DELAY regardless of
-    // DONE, so we can't tell from its output). (2) Write-persistence threshold: how many intervening
-    // cross-row writes does a value survive? (wrap=1 survives, retain=15 fails -> threshold between).
+    // -104: the HBPSRAM init branch OMITS HAL_MPI_SET_FIXLAT (every other PSRAM branch calls it to
+    // reconcile the device CR0 fixed latency with the controller HRCCR/HWCCR DCYC). So our controller
+    // read/write latency (ecc_en-1 / buf_mode-1 = 4) may not match the device's CR0 latency (code 14
+    // fixed) -> writes FIFO-forward but don't commit (a value survives exactly ONE cross-row write,
+    // -103: n1=1,n2=0). Sweep the controller DCYC (read+write together) and watch write-persistence:
+    // the X where a value survives 8 cross-row writes is the latency the device actually wants.
     {
-      s_psram_handle.Instance->PSCLR = 2u;
-      s_psram_handle.Instance->MISCR &= ~MPI_MISCR_SCKINV_Msk;
-      s_psram_handle.Instance->CALCR |= MPI_CALCR_EN;
-      HAL_Delay_us(1);
-      uint32_t it = 0u, done = 0u;
-      const uint32_t GUARD = 40000000u;
-      while (it < GUARD) {
-        if (s_psram_handle.Instance->CALCR & MPI_CALCR_DONE_Msk) { done = 1u; break; }
-        it++;
+      char r[128];
+      int off = 0;
+      off += sniprintf(r + off, sizeof(r) - off, "psram DCYCSWEEP persist8:");
+      static const uint8_t xs[] = {3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 12u, 14u, 16u};
+      for (unsigned i = 0; i < sizeof(xs) / sizeof(xs[0]); i++) {
+        HAL_FLASH_CFG_AHB_RCMD(&s_psram_handle, 7, (int8_t)xs[i], 0, 7, 3, 7, 7);
+        HAL_FLASH_CFG_AHB_WCMD(&s_psram_handle, 7, (int8_t)xs[i], 0, 7, 3, 7, 7);
+        __DSB();
+        uint32_t p = prv_psram_persist_after(8u);
+        off += sniprintf(r + off, sizeof(r) - off, " x%u=%u", (unsigned)xs[i], (unsigned)p);
+        prompt_watchdog_feed();
       }
-      uint32_t cc = s_psram_handle.Instance->CALCR;
-      uint32_t dly = (cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos;
-      s_psram_handle.Instance->CALCR &= ~MPI_CALCR_EN;
-      s_psram_handle.Instance->PSCLR = 1u;
-      sniprintf(buf, sizeof(buf), "psram CALPROBE: done=%u iters=%u delay=%u", (unsigned)done,
-                (unsigned)it, (unsigned)dly);
-      emit(buf);
+      emit(r);
     }
-    sniprintf(buf, sizeof(buf),
-              "psram PERSIST(1=survived): n1=%u n2=%u n3=%u n4=%u n6=%u n8=%u n12=%u n16=%u",
-              (unsigned)prv_psram_persist_after(1u), (unsigned)prv_psram_persist_after(2u),
-              (unsigned)prv_psram_persist_after(3u), (unsigned)prv_psram_persist_after(4u),
-              (unsigned)prv_psram_persist_after(6u), (unsigned)prv_psram_persist_after(8u),
-              (unsigned)prv_psram_persist_after(12u), (unsigned)prv_psram_persist_after(16u));
-    emit(buf);
     (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
