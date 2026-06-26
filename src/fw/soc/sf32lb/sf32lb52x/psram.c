@@ -701,22 +701,22 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -106: write-persistence is PER-BOOT MARGINAL (-103 died at 2 writes, -105 survived 4+16). The
-    // cal picks one passing `delay` (an edge, nudged dqs=delay-4) -> edge taps drift in/out per boot.
-    // Find the CENTER of the widest passing DQS window using the CLEAN separated metric (multi-row
-    // survival /16), not the confounded contiguous/cached one. Sweep dqs, keep the cal's sck.
+    // -107 RXCLKINV PHASE TEST (agent traced it in the HAL): the read-capture clock phase = MISCR
+    // bit 24 (RXCLKINV) + RXCLKDLY[7:0]. The cal tunes only SCK/DQS DELAY and NEVER sets RXCLKINV --
+    // it's left at reset and ASSUMES a fixed capture phase. DLL2 has no phase control (only a binary
+    // READY), so it comes up on either phase ~50/50 per boot -> on the wrong-phase boot the cal still
+    // locks but every read is wrong = our binary per-boot window open/close. Flip RXCLKINV and re-test:
+    // on a bad boot survival should swing 0 -> 16. If so, the fix is a boot-time read-back + RXCLKINV
+    // self-heal. Test current phase, flip, test, so one flash shows it regardless of which boot we got.
     {
-      char r[160];
-      int off = 0;
-      off += sniprintf(r + off, sizeof(r) - off, "psram DQSSWEEP survive16:");
-      for (uint32_t d = 8u; d <= 56u; d += 4u) {
-        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
-        __DSB();
-        uint32_t ok = prv_psram_multirow_survive(16u);
-        off += sniprintf(r + off, sizeof(r) - off, " d%u=%u", (unsigned)d, (unsigned)ok);
-        prompt_watchdog_feed();
-      }
-      emit(r);
+      uint32_t s0 = prv_psram_multirow_survive(16u);
+      s_psram_handle.Instance->MISCR ^= MPI_MISCR_RXCLKINV_Msk;
+      __DSB();
+      uint32_t s1 = prv_psram_multirow_survive(16u);
+      uint32_t mi = s_psram_handle.Instance->MISCR;
+      sniprintf(buf, sizeof(buf), "psram RXCLKINV: surv[init]=%u/16 surv[flip]=%u/16 MISCR=0x%08x",
+                (unsigned)s0, (unsigned)s1, (unsigned)mi);
+      emit(buf);
     }
     (void)prv_psram_persist_after;
     (void)prv_psram_persist_after_reads;
