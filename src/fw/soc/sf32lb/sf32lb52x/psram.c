@@ -585,7 +585,7 @@ static void prv_emit_console(const char *line) { prompt_send_response(line); }
 
 //! No-op emit sink: used for re-init retries (-110) so the bring-up's per-step markers don't flood
 //! the flaky NO_ENCRYPT console session; only the final summary line is emitted.
-static void prv_emit_quiet(const char *line) { (void)line; }
+__attribute__((unused)) static void prv_emit_quiet(const char *line) { (void)line; }
 
 // Persist the tap-break sweep result so the diag emits it FIRST on the NEXT psram call. The
 // NO_ENCRYPT console session drops ~3s after connect -- often before a long sweep's result ships.
@@ -715,27 +715,31 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // -111: -110's re-init didn't help, but it re-CALLED EnableDLL2/EXIT_LOWP which are no-ops when
-      // already enabled -- so it never forced a fresh DLL2 RE-LOCK. The DLL has no phase control and
-      // latches phase at lock; a bad lock persists. Force a real re-lock: DisableDLL2 before each
-      // re-init so EnableDLL2 inside prv_psram_init relocks with a fresh (50/50) phase. If a re-lock
-      // flips bad->good, the latched DLL2 clock phase is the per-boot root.
+      // -112 THERMAL/CLOCK margin: good boots were early/cool, every boot since is bad (die hot from
+      // many flash cycles). At 72MHz no tap works on a hot boot (-109). Lower the controller SCK via
+      // PSCLR for a WIDER eye that tolerates a hot die. On a bad boot, sweep PSCLR and measure clean
+      // multi-row survival; if a slower clock gives 16/16, thermal margin is the per-boot root and a
+      // lower fixed clock is the fix (slow but correct).
       uint32_t best = prv_psram_multirow_survive(16u);
-      uint32_t tries = 0u;
-      while (best < 16u && tries < 6u) {
-        tries++;
-        HAL_RCC_HCPU_DisableDLL2();
-        HAL_Delay_us(3000);
-        (void)prv_psram_init(div, prv_emit_quiet);
-        best = prv_psram_multirow_survive(16u);
+      char r[176];
+      int off = 0;
+      off += sniprintf(r + off, sizeof(r) - off, "psram PSCLRHEAL: pNORM=%u", (unsigned)best);
+      uint32_t best_p = 1u;
+      static const uint32_t ps[] = {2u, 4u, 8u, 16u};
+      for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]) && best < 16u; i++) {
+        s_psram_handle.Instance->PSCLR = ps[i];
+        __DSB();
+        uint32_t s = prv_psram_multirow_survive(16u);
+        off += sniprintf(r + off, sizeof(r) - off, " p%u=%u", (unsigned)ps[i], (unsigned)s);
+        if (s > best) { best = s; best_p = ps[i]; }
         prompt_watchdog_feed();
       }
-      uint32_t dll2 = (unsigned)HAL_RCC_HCPU_GetDLL2Freq();
+      s_psram_handle.Instance->PSCLR = best_p;
+      __DSB();
       uint32_t rerr = (best >= 16u) ? prv_psram_random_test(256u * 1024u, 4000u, 0) : 9999u;
-      sniprintf(buf, sizeof(buf), "psram RELOCK: tries=%u best=%u/16 dll2=%uHz rand-errs=%u ready=%u",
-                (unsigned)tries, (unsigned)best, (unsigned)dll2, (unsigned)rerr,
-                (unsigned)(best >= 16u && rerr == 0u));
-      emit(buf);
+      off += sniprintf(r + off, sizeof(r) - off, " best_p=%u rand=%u ready=%u", (unsigned)best_p,
+                       (unsigned)rerr, (unsigned)(best >= 16u && rerr == 0u));
+      emit(r);
       s_psram_ready = (best >= 16u && rerr == 0u);
     }
     (void)prv_psram_persist_after;
