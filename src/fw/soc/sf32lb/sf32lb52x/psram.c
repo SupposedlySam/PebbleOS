@@ -715,17 +715,25 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
+      // -111: -110's re-init didn't help, but it re-CALLED EnableDLL2/EXIT_LOWP which are no-ops when
+      // already enabled -- so it never forced a fresh DLL2 RE-LOCK. The DLL has no phase control and
+      // latches phase at lock; a bad lock persists. Force a real re-lock: DisableDLL2 before each
+      // re-init so EnableDLL2 inside prv_psram_init relocks with a fresh (50/50) phase. If a re-lock
+      // flips bad->good, the latched DLL2 clock phase is the per-boot root.
       uint32_t best = prv_psram_multirow_survive(16u);
       uint32_t tries = 0u;
-      while (best < 16u && tries < 5u) {
+      while (best < 16u && tries < 6u) {
         tries++;
+        HAL_RCC_HCPU_DisableDLL2();
+        HAL_Delay_us(3000);
         (void)prv_psram_init(div, prv_emit_quiet);
         best = prv_psram_multirow_survive(16u);
         prompt_watchdog_feed();
       }
+      uint32_t dll2 = (unsigned)HAL_RCC_HCPU_GetDLL2Freq();
       uint32_t rerr = (best >= 16u) ? prv_psram_random_test(256u * 1024u, 4000u, 0) : 9999u;
-      sniprintf(buf, sizeof(buf), "psram REINIT: tries=%u best=%u/16 rand-errs=%u ready=%u",
-                (unsigned)tries, (unsigned)best, (unsigned)rerr,
+      sniprintf(buf, sizeof(buf), "psram RELOCK: tries=%u best=%u/16 dll2=%uHz rand-errs=%u ready=%u",
+                (unsigned)tries, (unsigned)best, (unsigned)dll2, (unsigned)rerr,
                 (unsigned)(best >= 16u && rerr == 0u));
       emit(buf);
       s_psram_ready = (best >= 16u && rerr == 0u);
