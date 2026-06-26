@@ -475,6 +475,30 @@ static void prv_psram_wrap_scan(void (*emit_fn)(const char *)) {
   }
 }
 
+// GAPPED multi-row test: write `n` markers across distinct rows (16KB spacing) and read them back,
+// with a `gap` of empty iterations (CS# idle-high) between EACH access. -100/-101 showed the array
+// is fully addressable and idle-retains, but tight back-to-back cross-row bursts corrupt -- i.e. the
+// device's distributed refresh is starved during sustained access. Real heap code has natural gaps
+// between accesses; this checks whether a small gap is enough to make multi-row access reliable.
+static uint32_t prv_psram_gapped_retain(uint32_t n, uint32_t gap) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  volatile uint32_t acc = 0u;
+  for (uint32_t s = 0; s < n; s++) {
+    base[s * 4096u] = 0xBEEF0000u ^ s;
+    __DSB();
+    for (uint32_t t = 0; t < gap; t++) acc += t;
+  }
+  __DSB();
+  uint32_t errs = 0u;
+  for (uint32_t s = 0; s < n; s++) {
+    if (base[s * 4096u] != (0xBEEF0000u ^ s)) errs++;
+    for (uint32_t t = 0; t < gap; t++) acc += t;
+  }
+  (void)acc;
+  prompt_watchdog_feed();
+  return errs;
+}
+
 // RETENTION discriminator: write 16 markers, burn `spin` empty iterations with NO PSRAM access (so
 // the device, CS# idle-high, should self-refresh), then read back. errs growing with spin => the
 // self-refresh isn't maintaining the array => fix CR1/refresh config.
@@ -628,11 +652,23 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    prv_psram_wrap_scan(emit);
+    // -102 GAPPED multi-row: the array is fully addressable (-101 wrap all INDEP) and idle-retains
+    // (-100 time-independent), but tight back-to-back cross-row bursts corrupt (refresh starvation).
+    // Does a small CS#-high gap between accesses (like real heap code) make multi-row reliable?
+    uint32_t g0 = prv_psram_gapped_retain(16u, 0u);
+    uint32_t g1 = prv_psram_gapped_retain(16u, 64u);
+    uint32_t g2 = prv_psram_gapped_retain(16u, 1024u);
+    uint32_t g3 = prv_psram_gapped_retain(16u, 16384u);
+    uint32_t g4 = prv_psram_gapped_retain(64u, 16384u);
+    sniprintf(buf, sizeof(buf),
+              "psram GAPPED(errs): gap0=%u gap64=%u gap1k=%u gap16k=%u  gap16k/64rows=%u",
+              (unsigned)g0, (unsigned)g1, (unsigned)g2, (unsigned)g3, (unsigned)g4);
+    emit(buf);
+    (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
     (void)prv_psram_random_test;
-    s_psram_ready = false;
+    s_psram_ready = (g3 == 0u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
