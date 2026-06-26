@@ -489,31 +489,25 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (read-cycle, 5-bit max 31). Pin a fixed tap (cut per-boot cal noise) + RBSIZE=2 (force drops) +
     // sweep CSHMIN UP with TRCMIN maxed; measure CBUS (the heap path). If a value lets cache lines
     // continue, CBUS jumps from 32B toward MB.
+    // -93: NO CS#-timing knob fixed the continuation (CBUS stuck at 32B = one cache line). The device
+    // needs a REFRESH every ~512B (tCSM); in FIXED latency the controller mis-times reads when a
+    // refresh extends latency mid-continuation. Try VARIABLE latency -- controller samples RWDS during
+    // CA to detect the refresh-extended latency and adjusts. Clear CR0 fixed-latency bit (0xe78f ->
+    // 0xe787) + HAL_MPI_EN_FIXLAT(0). If the continuation now survives a refresh, CBUS jumps from 32B.
     HAL_MPI_SET_SCK(&s_psram_handle, 35u, 0);
     HAL_MPI_SET_DQS_DELAY(&s_psram_handle, 32u);
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    uint32_t best_cb = 0u;
-    uint16_t best_csh = 3u;
-    static const uint16_t cshs[] = {3u, 7u, 11u, 15u};
-    for (unsigned ci = 0; ci < sizeof(cshs) / sizeof(cshs[0]); ci++) {
-      HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 950u, cshs[ci], 31u);  // CSHMIN swept, TRCMIN maxed
-      uint32_t cb = prv_psram_usable_at(0x10000000u, 64u * 1024u);
-      sniprintf(buf, sizeof(buf), "psram CSHMIN=%u CBUS=%uB", (unsigned)cshs[ci], (unsigned)cb);
-      emit(buf);
-      if (cb > best_cb) {
-        best_cb = cb;
-        best_csh = cshs[ci];
-      }
-      prompt_watchdog_feed();
-    }
-    s_tapbreak_best = best_cb;  // persist (sck field carries best CSHMIN) -- emitted first next call
-    s_tapbreak_sck = (uint8_t)best_csh;
-    s_tapbreak_dqs = 0u;
-    sniprintf(buf, sizeof(buf), "psram CSHMIN best: csh=%u CBUS=%uB", (unsigned)best_csh,
-              (unsigned)best_cb);
+    HAL_HYPER_PSRAM_WriteCR(&s_psram_handle, 0, 0xe787u);  // CR0: clear fixed-latency bit -> variable
+    HAL_MPI_EN_FIXLAT(&s_psram_handle, 0);                 // controller: variable latency (sample RWDS)
+    uint32_t vc = prv_psram_usable_at(0x10000000u, 256u * 1024u);
+    uint32_t vs = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
+    sniprintf(buf, sizeof(buf), "psram VARLAT USABLE: CBUS=%uB SBUS=%uB (of 256K/64K)",
+              (unsigned)vc, (unsigned)vs);
     emit(buf);
-    HAL_FLASH_SET_CS_TIME(&s_psram_handle, 6u, 950u, best_csh, 31u);
-    s_psram_ready = (best_cb >= 64u * 1024u);
+    s_tapbreak_best = vc;  // persist CBUS (heap path) -- emitted first next call
+    s_tapbreak_sck = 0u;
+    s_tapbreak_dqs = 0u;
+    s_psram_ready = (vc >= 64u * 1024u);
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
