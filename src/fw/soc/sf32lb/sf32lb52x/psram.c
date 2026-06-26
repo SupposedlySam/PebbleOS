@@ -480,12 +480,9 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     sniprintf(buf, sizeof(buf), "psram FAST w0: wrote A5A50000,0000A5A5 read %08x,%08x",
               (unsigned)sb[0], (unsigned)sb[1]);
     emit(buf);
-    uint16_t id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
-    uint16_t cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
-    uint16_t cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
-    sniprintf(buf, sizeof(buf), "psram FAST HB: ID0=0x%04x CR0=0x%04x CR1=0x%04x",
-              (unsigned)id0, (unsigned)cr0, (unsigned)cr1);
-    emit(buf);
+    // (REMOVED the HyperBus ReadID/ReadCR readback here -- it INTERMITTENTLY HANGS KernelBG, wedging
+    // the diag right after w0 so the sweep never runs. We already have its values: CR0=0xe78f,
+    // ID0=0x960c, CR1=0xc1ff. Judge by real array reads, not register reads.)
     uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
     sniprintf(buf, sizeof(buf), "psram FAST USABLE (cal tap): SBUS=%uB", (unsigned)us);
     emit(buf);
