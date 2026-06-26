@@ -447,6 +447,21 @@ static uint32_t prv_psram_alias_errs(void) {
   return errs;
 }
 
+// WRITE-PERSISTENCE: write a marker at base[0], do `n` intervening writes to OTHER rows (16KB apart),
+// then read base[0] back. Returns 1 if base[0] survived, 0 if a later cross-row write destroyed it.
+// Sweeping n finds the threshold -- how many cross-row writes a value survives (write-side, not read).
+static uint32_t prv_psram_persist_after(uint32_t n) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  base[0] = 0xAAAA1234u;
+  __DSB();
+  for (uint32_t k = 1; k <= n; k++) {
+    base[k * 4096u] = 0x55550000u ^ k;
+    __DSB();
+    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  return (base[0] == 0xAAAA1234u) ? 1u : 0u;
+}
+
 // ADDRESS-WRAP / row-size finder: for each distance D (words), write distinct values at base[0] and
 // base[D] and read BOTH back. base[0] is read AFTER writing base[D] (different address), so a 1-deep
 // write buffer can't fake it. The smallest D where they stop being independent reveals address wrap
@@ -652,23 +667,42 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -102 GAPPED multi-row: the array is fully addressable (-101 wrap all INDEP) and idle-retains
-    // (-100 time-independent), but tight back-to-back cross-row bursts corrupt (refresh starvation).
-    // Does a small CS#-high gap between accesses (like real heap code) make multi-row reliable?
-    uint32_t g0 = prv_psram_gapped_retain(16u, 0u);
-    uint32_t g1 = prv_psram_gapped_retain(16u, 64u);
-    uint32_t g2 = prv_psram_gapped_retain(16u, 1024u);
-    uint32_t g3 = prv_psram_gapped_retain(16u, 16384u);
-    uint32_t g4 = prv_psram_gapped_retain(64u, 16384u);
+    // -103: two code-grounded questions in one flash. (1) Does the read-strobe cal actually LOCK?
+    // Replicate the HAL CAL_DELAY probe but watch DONE directly (the HAL reads DELAY regardless of
+    // DONE, so we can't tell from its output). (2) Write-persistence threshold: how many intervening
+    // cross-row writes does a value survive? (wrap=1 survives, retain=15 fails -> threshold between).
+    {
+      s_psram_handle.Instance->PSCLR = 2u;
+      s_psram_handle.Instance->MISCR &= ~MPI_MISCR_SCKINV_Msk;
+      s_psram_handle.Instance->CALCR |= MPI_CALCR_EN;
+      HAL_Delay_us(1);
+      uint32_t it = 0u, done = 0u;
+      const uint32_t GUARD = 40000000u;
+      while (it < GUARD) {
+        if (s_psram_handle.Instance->CALCR & MPI_CALCR_DONE_Msk) { done = 1u; break; }
+        it++;
+      }
+      uint32_t cc = s_psram_handle.Instance->CALCR;
+      uint32_t dly = (cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos;
+      s_psram_handle.Instance->CALCR &= ~MPI_CALCR_EN;
+      s_psram_handle.Instance->PSCLR = 1u;
+      sniprintf(buf, sizeof(buf), "psram CALPROBE: done=%u iters=%u delay=%u", (unsigned)done,
+                (unsigned)it, (unsigned)dly);
+      emit(buf);
+    }
     sniprintf(buf, sizeof(buf),
-              "psram GAPPED(errs): gap0=%u gap64=%u gap1k=%u gap16k=%u  gap16k/64rows=%u",
-              (unsigned)g0, (unsigned)g1, (unsigned)g2, (unsigned)g3, (unsigned)g4);
+              "psram PERSIST(1=survived): n1=%u n2=%u n3=%u n4=%u n6=%u n8=%u n12=%u n16=%u",
+              (unsigned)prv_psram_persist_after(1u), (unsigned)prv_psram_persist_after(2u),
+              (unsigned)prv_psram_persist_after(3u), (unsigned)prv_psram_persist_after(4u),
+              (unsigned)prv_psram_persist_after(6u), (unsigned)prv_psram_persist_after(8u),
+              (unsigned)prv_psram_persist_after(12u), (unsigned)prv_psram_persist_after(16u));
     emit(buf);
     (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
     (void)prv_psram_random_test;
-    s_psram_ready = (g3 == 0u);
+    (void)prv_psram_gapped_retain;
+    s_psram_ready = false;
     return;  // skip the old long tap sweep + 64KB taptest below
   }
 
