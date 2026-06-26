@@ -462,6 +462,24 @@ static uint32_t prv_psram_persist_after(uint32_t n) {
   return (base[0] == 0xAAAA1234u) ? 1u : 0u;
 }
 
+// Multi-row SEPARATED survival: write `m` markers across m rows (16KB apart), then read them all
+// back; return how many survived (0..m). This is the marginal access pattern (write-all-then-read).
+// Used to score a DQS/SCK tap by REAL persistence, not the confounded contiguous/cached metric.
+static uint32_t prv_psram_multirow_survive(uint32_t m) {
+  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
+  for (uint32_t s = 0; s < m; s++) {
+    base[s * 4096u] = 0x6789ABCDu ^ (s * 0x01010101u);
+    if ((s & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  __DSB();
+  uint32_t ok = 0u;
+  for (uint32_t s = 0; s < m; s++) {
+    if (base[s * 4096u] == (0x6789ABCDu ^ (s * 0x01010101u))) ok++;
+    if ((s & 0x3fu) == 0u) prompt_watchdog_feed();
+  }
+  return ok;
+}
+
 // Like prv_psram_persist_after but the intervening accesses are READS (not writes). Discriminates
 // write-commit failure (survives many reads, dies on writes) vs read-recency (array read only returns
 // recently-touched rows -> dies on reads too).
@@ -683,16 +701,25 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
     // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
     // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -105 DISCRIMINATE write-commit vs read-recency: -104 ruled out latency (no DCYC fixes persist).
-    // Does base[0] die from intervening WRITES (write-commit broken) or also from intervening READS
-    // (array read only returns recently-touched rows)? Compare the two thresholds directly.
-    sniprintf(buf, sizeof(buf),
-              "psram WvsR write-survive: w1=%u w2=%u w4=%u | read-survive: r1=%u r2=%u r4=%u r8=%u r16=%u",
-              (unsigned)prv_psram_persist_after(1u), (unsigned)prv_psram_persist_after(2u),
-              (unsigned)prv_psram_persist_after(4u), (unsigned)prv_psram_persist_after_reads(1u),
-              (unsigned)prv_psram_persist_after_reads(2u), (unsigned)prv_psram_persist_after_reads(4u),
-              (unsigned)prv_psram_persist_after_reads(8u), (unsigned)prv_psram_persist_after_reads(16u));
-    emit(buf);
+    // -106: write-persistence is PER-BOOT MARGINAL (-103 died at 2 writes, -105 survived 4+16). The
+    // cal picks one passing `delay` (an edge, nudged dqs=delay-4) -> edge taps drift in/out per boot.
+    // Find the CENTER of the widest passing DQS window using the CLEAN separated metric (multi-row
+    // survival /16), not the confounded contiguous/cached one. Sweep dqs, keep the cal's sck.
+    {
+      char r[160];
+      int off = 0;
+      off += sniprintf(r + off, sizeof(r) - off, "psram DQSSWEEP survive16:");
+      for (uint32_t d = 8u; d <= 56u; d += 4u) {
+        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)d);
+        __DSB();
+        uint32_t ok = prv_psram_multirow_survive(16u);
+        off += sniprintf(r + off, sizeof(r) - off, " d%u=%u", (unsigned)d, (unsigned)ok);
+        prompt_watchdog_feed();
+      }
+      emit(r);
+    }
+    (void)prv_psram_persist_after;
+    (void)prv_psram_persist_after_reads;
     (void)prv_psram_wrap_scan;
     (void)prv_psram_alias_errs;
     (void)prv_psram_retain_errs;
