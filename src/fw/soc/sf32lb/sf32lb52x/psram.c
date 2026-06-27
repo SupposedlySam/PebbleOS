@@ -715,32 +715,35 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // -112 THERMAL/CLOCK margin: good boots were early/cool, every boot since is bad (die hot from
-      // many flash cycles). At 72MHz no tap works on a hot boot (-109). Lower the controller SCK via
-      // PSCLR for a WIDER eye that tolerates a hot die. On a bad boot, sweep PSCLR and measure clean
-      // multi-row survival; if a slower clock gives 16/16, thermal margin is the per-boot root and a
-      // lower fixed clock is the fix (slow but correct).
-      uint32_t best = prv_psram_multirow_survive(16u);
-      char r[176];
+      // -114 CLKCLEAN: on a GOOD boot, lowering the clock helps (-112 data: pNORM=15, p2=16, but the
+      // dense random test still had ~99 errs because the old diag STOPPED at the first PSCLR with
+      // multirow=16). Now sweep ALL PSCLR {1,2,4,8,16}; for each that passes multirow=16, run the dense
+      // random test; pick the FIRST (highest) clock that is FULLY CLEAN (random==0). ready = a clean
+      // clock exists -> the WAMR/Dart pool can use the PSRAM -> dart test -> sum=45. This decisively
+      // answers "is the PSRAM usable on a good boot with clock reduction?" (random n=2000 for speed).
+      char r[200];
       int off = 0;
-      off += sniprintf(r + off, sizeof(r) - off, "psram PSCLRHEAL: pNORM=%u", (unsigned)best);
-      uint32_t best_p = 1u;
-      static const uint32_t ps[] = {2u, 4u, 8u, 16u};
-      for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]) && best < 16u; i++) {
+      off += sniprintf(r + off, sizeof(r) - off, "psram CLKCLEAN:");
+      uint32_t best_p = 0u, best_rand = 999999u;
+      static const uint32_t ps[] = {1u, 2u, 4u, 8u, 16u};
+      for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) {
         s_psram_handle.Instance->PSCLR = ps[i];
         __DSB();
-        uint32_t s = prv_psram_multirow_survive(16u);
-        off += sniprintf(r + off, sizeof(r) - off, " p%u=%u", (unsigned)ps[i], (unsigned)s);
-        if (s > best) { best = s; best_p = ps[i]; }
+        uint32_t m = prv_psram_multirow_survive(16u);
+        uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 2000u, 0) : 999999u;
+        off += sniprintf(r + off, sizeof(r) - off, " p%u(m%u,r%u)", (unsigned)ps[i], (unsigned)m,
+                         (unsigned)rr);
+        if (rr < best_rand) { best_rand = rr; best_p = ps[i]; }
         prompt_watchdog_feed();
+        if (rr == 0u) break;  // found a fully-clean clock -> use it
       }
+      if (best_p == 0u) best_p = 1u;
       s_psram_handle.Instance->PSCLR = best_p;
       __DSB();
-      uint32_t rerr = (best >= 16u) ? prv_psram_random_test(256u * 1024u, 4000u, 0) : 9999u;
-      off += sniprintf(r + off, sizeof(r) - off, " best_p=%u rand=%u ready=%u", (unsigned)best_p,
-                       (unsigned)rerr, (unsigned)(best >= 16u && rerr == 0u));
+      off += sniprintf(r + off, sizeof(r) - off, " best_p=%u best_rand=%u ready=%u", (unsigned)best_p,
+                       (unsigned)best_rand, (unsigned)(best_rand == 0u));
       emit(r);
-      s_psram_ready = (best >= 16u && rerr == 0u);
+      s_psram_ready = (best_rand == 0u);
     }
     (void)prv_psram_persist_after;
     (void)prv_psram_persist_after_reads;
