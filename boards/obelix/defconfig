@@ -90,3 +90,11 @@ CONFIG_ACCEL_SENSITIVITY=y
 CONFIG_APP_SCALING=y
 CONFIG_ORIENTATION_MANAGER=y
 CONFIG_MODDABLE_XS=y
+
+# Phone-free Mac-gateway dev loop: connect without BLE bonding (no pairing ceremony,
+# plain unencrypted PPoGATT). Avoids the macOS pair prompt and the bonded-reconnect
+# gremlin (encryption restored inside CONNECT with no ENC_CHANGE -> watch never sees
+# connected -> PPoGATT never starts -> reconnect wedges). Pinned here so a reconfigure
+# can't silently drop it: a slot1 reconfigure reset it to default-n once, which is what
+# wedged every post-flash reconnect from -114 on.
+CONFIG_BT_DEV_NO_BOND=y
