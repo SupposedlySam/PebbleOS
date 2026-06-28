@@ -408,16 +408,13 @@ static void prv_push_ble_persist_to_shared_prf(void) {
 
 static void prv_load_ble_pairing_from_prf(void) {
 #ifdef CONFIG_BT_DEV_NO_BOND
-  // No-bond dev build: stock PRF bonds during a fresh-pair flash and leaves a BLE pairing in
-  // shared-PRF flash; this load path used to copy it into the gapDB too. Either store, once the
-  // bond is registered into the host RAM store (prv_comm_start), makes the host replay the LTK to
-  // the controller on reconnect, so the link comes up encrypted with no ENC_CHANGE -> the kernel LE
-  // client never sees connected -> PPoGATT never starts -> the no-bond session wedges (previously
-  // only a physical PRF combo cleared it). This build never wants a persistent bond, so clear BOTH
-  // stores on boot (delete_all_pairings rewrites the gapDB and erases shared-PRF). The companion
-  // guard in prv_comm_start also skips registration, so a stale gapDB entry never reaches the
-  // controller even if one slips through.
-  bt_persistent_storage_delete_all_pairings();
+  // No-bond dev build: do not copy any PRF pairing into the gapDB. A stored bond only wedges the
+  // reconnect if it reaches the host RAM store, and that path (bt_persistent_storage_register_existing_ble_bondings
+  // in prv_comm_start) is skipped under CONFIG_BT_DEV_NO_BOND, so the host NACKs the controller's LTK
+  // request and the link stays unencrypted -> no bonded-reconnect gremlin. Any stale gapDB entry is
+  // therefore inert. We deliberately avoid clearing stores here: a flash/settings write this early in
+  // bt_persistent_storage_init is risky (delete_all_pairings can hang BT init on a fresh flash), and
+  // it is unnecessary given the registration guard.
   return;
 #else
   SMPairingInfo prf_pairing_info;
