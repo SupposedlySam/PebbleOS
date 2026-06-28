@@ -98,3 +98,9 @@ CONFIG_MODDABLE_XS=y
 # can't silently drop it: a slot1 reconfigure reset it to default-n once, which is what
 # wedged every post-flash reconnect from -114 on.
 CONFIG_BT_DEV_NO_BOND=y
+
+# North star: the on-device Dart/Wasm (WAMR) runtime, and the `dart test`/`dart wasm`/`psram`
+# console commands gated behind it (prompt_commands.h). default n + manually set in .config means a
+# reconfigure silently drops it (same trap that dropped CONFIG_BT_DEV_NO_BOND); pin it here so the
+# dev build always has the dart runtime + diagnostics.
+CONFIG_DART_RUNTIME=y
