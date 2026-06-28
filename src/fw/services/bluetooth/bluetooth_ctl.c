@@ -77,7 +77,16 @@ static void prv_comm_start(void) {
   // Register existing bondings before bringing the connection up: NimBLE
   // restores them before the link is established. The other backends use
   // no-op bonding handlers, so doing it early is harmless for them too.
+#ifndef CONFIG_BT_DEV_NO_BOND
   bt_persistent_storage_register_existing_ble_bondings();
+#else
+  // No-bond dev build: never hand a stored bond to the controller. A fresh-pair PRF flash leaves a
+  // bond in the gapDB; registering it loads the LTK into the host's RAM store, so on reconnect the
+  // host replays the key to the controller and the link comes up encrypted with no ENC_CHANGE event
+  // -> the kernel LE client never sees connected -> PPoGATT never starts -> the no-bond session
+  // wedges (previously only a physical PRF combo cleared it). Skipping registration keeps the RAM
+  // store empty, so the host NACKs the controller's LTK request and the link stays unencrypted.
+#endif
 
   s_comm_is_running = bt_driver_start(config);
   kernel_free(config);
