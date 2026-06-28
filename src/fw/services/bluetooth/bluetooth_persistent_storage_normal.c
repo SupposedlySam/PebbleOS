@@ -398,6 +398,8 @@ static void prv_load_local_data_from_prf(void) {
   }
 }
 
+#ifndef CONFIG_BT_DEV_NO_BOND
+// Only used by prv_load_ble_pairing_from_prf's bonding path; the no-bond build skips that path.
 static void prv_push_ble_persist_to_shared_prf(void) {
   BTBondingID bonding_id = bt_persistent_storage_get_ble_ancs_bonding();
 
@@ -405,6 +407,7 @@ static void prv_push_ble_persist_to_shared_prf(void) {
     prv_update_bondings(bonding_id, BtPersistBondingTypeBLE);
   }
 }
+#endif
 
 static void prv_load_ble_pairing_from_prf(void) {
 #ifdef CONFIG_BT_DEV_NO_BOND
