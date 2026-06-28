@@ -407,6 +407,16 @@ static void prv_push_ble_persist_to_shared_prf(void) {
 }
 
 static void prv_load_ble_pairing_from_prf(void) {
+#ifdef CONFIG_BT_DEV_NO_BOND
+  // No-bond dev build: stock PRF bonds during a fresh-pair flash and leaves a BLE pairing in
+  // shared-PRF flash. Loading it here makes the controller restore encryption on reconnect, which
+  // hits the bonded-reconnect gremlin (encryption restored inside CONNECT with no ENC_CHANGE -> the
+  // kernel LE client never sees connected -> PPoGATT never starts -> the no-bond session wedges).
+  // Previously only a physical PRF button-combo could clear it. Since this build never wants a
+  // persistent bond, erase the stale PRF pairing on every boot so reconnects are always clean.
+  shared_prf_storage_erase_ble_pairing_data();
+  return;
+#else
   SMPairingInfo prf_pairing_info;
   char device_name[BT_DEVICE_NAME_BUFFER_SIZE];
   bool requires_address_pinning;
@@ -422,6 +432,7 @@ static void prv_load_ble_pairing_from_prf(void) {
   // PRF pairing storage has only one pairing slot. Assume is_gateway:
   bt_persistent_storage_store_ble_pairing(&prf_pairing_info, true /* is_gateway */, device_name,
                                           requires_address_pinning, flags);
+#endif
 }
 
 static void prv_load_data_from_prf(void) {
