@@ -2,6 +2,12 @@
   "comments": "This file contains resource definitions for platform Obelix",
   "media": [
     {
+      "type": "raw",
+      "name": "FLUTTER_COUNTER_WASM",
+      "file": "normal/obelix/counter_device.wasm",
+      "_comment": "The dart2wasm Flutter counter module (M3); loaded by the Dart runtime via resource_load_byte_range_system."
+    },
+    {
       "type": "pdc",
       "name": "VOICE_MICROPHONE_LARGE",
       "file": "normal/snowy/images/Pebble_80x80_Microphone.svg",

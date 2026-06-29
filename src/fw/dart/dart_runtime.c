@@ -6,10 +6,12 @@
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
 /* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
-   partition (fw is ~2.07MB), so it is NOT embedded -- it is pushed to the watch's
-   storage flash as the PFS file "counter.wasm" and loaded at runtime (see
-   prv_load_flutter_module + M3_PLAN). */
-#include "pbl/services/filesystem/pfs.h"
+   partition (fw is ~2.07MB), so it is NOT embedded in .text -- it ships in the
+   resource pack (resources/normal/obelix/resource_map.json FLUTTER_COUNTER_WASM,
+   on external flash) and the runtime loads it via resource_load_byte_range_system
+   into a RAM buffer (see prv_load_flutter_module + M3_PLAN). */
+#include "resource/resource.h"
+#include "resource/resource_ids.auto.h"
 
 #include "console/dbgserial.h"
 #include "console/prompt.h"
@@ -401,28 +403,26 @@ void command_dart_test(void) {
 //! drives it. The ~1.18MB module is too big to embed in the 3MB firmware FLASH,
 //! so it loads from the watch's storage flash; prv_load_flutter_module() returns
 //! the buffer (NULL until the storage-load path is wired).
-//! Load the Flutter module from the PFS file "counter.wasm" (pushed to the watch
-//! via PULSE bulk-io) into a RAM buffer the caller owns. Uses the WAMR pool
+//! Load the Flutter counter module (the FLUTTER_COUNTER_WASM resource, shipped in
+//! the resource pack) into a RAM buffer the caller owns. Uses the WAMR pool
 //! allocator (PSRAM) since the module is ~1.18MB; needs the runtime initialized
-//! first. @return the buffer (free with wasm_runtime_free) or NULL if absent.
+//! first. @return the buffer (free with wasm_runtime_free) or NULL on failure.
 static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   *size_out = 0;
   if (!dart_runtime_init()) {
     return NULL;
   }
-  int fd = pfs_open("counter.wasm", OP_FLAG_READ, 0 /*file_type*/, 0);
-  if (fd < 0) {
-    return NULL; /* not pushed to PFS yet */
+  size_t sz = resource_size(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM);
+  if (sz == 0) {
+    return NULL; /* resource missing */
   }
-  size_t sz = pfs_get_file_size(fd);
-  uint8_t *buf = (sz > 0) ? (uint8_t *)wasm_runtime_malloc(sz) : NULL;
+  uint8_t *buf = (uint8_t *)wasm_runtime_malloc(sz);
   if (!buf) {
-    pfs_close(fd);
     return NULL;
   }
-  int rd = pfs_read(fd, buf, sz);
-  pfs_close(fd);
-  if (rd != (int)sz) {
+  size_t rd = resource_load_byte_range_system(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM,
+                                              0, buf, sz);
+  if (rd != sz) {
     wasm_runtime_free(buf);
     return NULL;
   }
@@ -438,7 +438,7 @@ void command_dart_flutter(void) {
   uint32_t size = 0;
   uint8_t *mod = prv_load_flutter_module(&size);
   if (!mod) {
-    prompt_send_response("dart: no 'counter.wasm' in PFS -- push it first (see M3_PLAN)");
+    prompt_send_response("dart: FLUTTER_COUNTER_WASM resource missing or no RAM");
     return;
   }
   bool ok = dart_app_start(mod, size); /* takes ownership of mod */
