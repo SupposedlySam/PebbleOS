@@ -1289,8 +1289,6 @@ BTCCCDID bt_persistent_storage_store_cccd(const BleCCCD *cccd) {
 }
 
 bool bt_persistent_storage_delete_cccd(const BTDeviceInternal *peer, uint16_t chr_val_handle) {
-  BTCCCDID cccd_id;
-
   FindCCCDItrData itr_data = {
     .peer = peer,
     .chr_val_handle = chr_val_handle,
@@ -1302,7 +1300,9 @@ bool bt_persistent_storage_delete_cccd(const BTDeviceInternal *peer, uint16_t ch
     return false;
   }
 
-  if (prv_file_set(&cccd_id, sizeof(cccd_id), NULL, 0) == GapBondingFileSetFail) {
+  // Delete by the FOUND id. (Was a latent bug: an uninitialized local `cccd_id` was used as the key,
+  // deleting a garbage/wrong record.)
+  if (prv_file_set(&itr_data.id, sizeof(itr_data.id), NULL, 0) == GapBondingFileSetFail) {
     return false;
   }
 

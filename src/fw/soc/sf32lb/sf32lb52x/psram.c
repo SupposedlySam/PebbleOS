@@ -443,6 +443,31 @@ static uint32_t prv_psram_random_test(uint32_t span_bytes, uint32_t n, int inter
   return errs;
 }
 
+// CONTIGUOUS full-extent verify with ADDRESS-HASHED values. This is the readiness gate's heavy
+// lifter: unlike the scattered random test (which only proves the access mode already known to pass),
+// this writes then reads EVERY word over `span_bytes` in linear order -- the contiguous-burst pattern
+// WAMR actually uses (memcpy of the module, GC mark/sweep). The value is a per-INDEX hash, so an
+// addressing/aliasing fault (two indices mapping to one physical cell -- no size register on this
+// part) makes the earlier index read back the later index's value => counted as a mismatch. `invert`
+// flips polarity to catch coupling/ISI faults a single pattern misses. Returns the mismatch count
+// over the WHOLE span. Run it over the full pool extent the consumer is handed, not a fraction.
+static uint32_t prv_psram_contig_verify(uint32_t span_bytes, int invert) {
+  volatile uint32_t *p = (volatile uint32_t *)PSRAM_TEST_BASE;
+  const uint32_t words = span_bytes / 4u;
+  const uint32_t flip = invert ? 0xFFFFFFFFu : 0u;
+  for (uint32_t i = 0; i < words; i++) {
+    p[i] = (i * 2654435761u) ^ flip;  // Knuth multiplicative hash of the index
+    if ((i & 0xfffu) == 0u) prompt_watchdog_feed();
+  }
+  __DSB();
+  uint32_t errs = 0u;
+  for (uint32_t i = 0; i < words; i++) {
+    if (p[i] != ((i * 2654435761u) ^ flip)) errs++;
+    if ((i & 0xfffu) == 0u) prompt_watchdog_feed();
+  }
+  return errs;
+}
+
 // ALIASING discriminator: write 16 distinct values at 16KB-spaced (4096-word) offsets across 256KB,
 // read straight back (minimal time, so retention is NOT a factor). errs>0 => far-apart addresses
 // collide => the array aliases (upper address lines unmapped / wrong row-size config), not retention.
@@ -725,19 +750,44 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // CLOCK-FIX TEST (2026-06-28): with the controller now at the vendor 288MHz, the in-HAL cal
-      // locks (CALCR.DONE=1) and sets a correct SCK/DQS, so the read strobe is already centered --
-      // NO sweep needed (and sweeping/ writing RXCLKINV post-init WEDGES the controller -- the dead
-      // ends -121..-123). Just VERIFY: multi-row survival + a dense random read-back over the 256KB
-      // the pool uses. ready = fully clean (random==0). The dart pool (uncached @0x60000000, no
-      // separate init) inherits this controller state directly.
-      char r[120];
+      // HARDENED VERIFY (2026-06-28): the earlier gate ran SCATTERED reads over 256KB -- the one access
+      // mode already known to pass -- while WAMR uses CONTIGUOUS bursts over the full 2MB pool. Gate on
+      // the access pattern AND extent the consumer actually uses (contiguous, full 2MB, + inverse), and
+      // measure the read-strobe margin: CALCR.DONE reads 0 on this part even when reads are clean, so
+      // the tap is not cal-validated -- the passing-window width tells us whether we have headroom or
+      // are on a cliff (a 1-2 tap window that reads clean today can drift out with temp/voltage).
+      char r[180];
+      const uint32_t SPAN = 2u * 1024u * 1024u;  // == the extent dart_runtime hands WAMR (0x60000000)
+      // Margin: sweep DQS (multirow-scored), count passing taps; save/restore the cal's MISCR so the
+      // gate runs at the cal's chosen tap. (Post-init DQS writes are safe; only RXCLKINV writes wedge.)
+      uint32_t saved_miscr = s_psram_handle.Instance->MISCR;
+      int margin = 0;
+      for (int dqs = 0; dqs < 256; dqs += 8) {
+        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
+        HAL_Delay_us(10);
+        __DSB();
+        if (prv_psram_multirow_survive(8u) >= 8u) {
+          margin++;
+        }
+        prompt_watchdog_feed();
+      }
+      s_psram_handle.Instance->MISCR = saved_miscr;
+      __DSB();
+      // Strong gate at the cal's tap: full extent, the consumer's contiguous burst pattern + inverse,
+      // plus scattered + multirow. ready ONLY if every pattern is fully clean over the WHOLE 2MB.
       uint32_t m = prv_psram_multirow_survive(16u);
-      uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 8000u, 0) : 999999u;
-      sniprintf(r, sizeof(r), "psram TEST: multirow=%u/16 random=%u ready=%u", (unsigned)m,
-                (unsigned)rr, (unsigned)(rr == 0u));
+      uint32_t c0 = prv_psram_contig_verify(SPAN, 0);
+      uint32_t c1 = prv_psram_contig_verify(SPAN, 1);
+      uint32_t rr = prv_psram_random_test(SPAN, 8000u, 0);
+      uint32_t done = (s_psram_handle.Instance->CALCR & MPI_CALCR_DONE_Msk) ? 1u : 0u;
+      uint32_t clk = HAL_QSPI_GET_CLK(&s_psram_handle);
+      s_psram_ready = (m >= 16u && c0 == 0u && c1 == 0u && rr == 0u);
+      sniprintf(r, sizeof(r),
+                "psram VERIFY: clk=%uHz DONE=%u margin=%d/32 multirow=%u/16 contig=%u inv=%u rand=%u "
+                "ready=%u",
+                (unsigned)clk, (unsigned)done, margin, (unsigned)m, (unsigned)c0, (unsigned)c1,
+                (unsigned)rr, (unsigned)s_psram_ready);
       emit(r);
-      s_psram_ready = (rr == 0u);
     }
     (void)prv_psram_persist_after;
     (void)prv_psram_persist_after_reads;

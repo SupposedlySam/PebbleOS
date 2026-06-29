@@ -130,6 +130,14 @@ static HStr *prv_unwrap(wasm_externref_obj_t ref) {
 
 /* ---- the 11 dart.* native functions ---- */
 
+// Capture the most recent Dart print() line so C can ASSERT the computed value (e.g. "sum=45")
+// rather than trusting "ran without trapping" -- silent PSRAM/heap corruption could yield a wrong
+// but non-trapping result. dart print() goes to dbgserial + PBL_LOG (neither reaches the BLE
+// console), so this buffer is how the runtime surfaces + checks the literal result.
+static char s_dart_last_print[160];
+const char *dart_embedder_last_print(void) { return s_dart_last_print; }
+void dart_embedder_clear_last_print(void) { s_dart_last_print[0] = '\0'; }
+
 static void prv_print(wasm_exec_env_t env, wasm_externref_obj_t line) {
   HStr *s = prv_unwrap(line);
   if (s) {
@@ -137,6 +145,9 @@ static void prv_print(wasm_exec_env_t env, wasm_externref_obj_t line) {
     dbgserial_putstr(u ? u : "");
     // Also log so Dart's print() is visible over `pebble logs` on a sealed watch.
     PBL_LOG_ALWAYS("dart print: %s", u ? u : "");
+    if (u) {
+      snprintf(s_dart_last_print, sizeof(s_dart_last_print), "%s", u);
+    }
     kernel_free(u);
   } else {
     dbgserial_putstr("(null)");

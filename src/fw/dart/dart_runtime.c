@@ -260,18 +260,43 @@ bool dart_run_test_module(void) {
   return dart_run_module(g_dart_test_module, g_dart_test_module_size);
 }
 
-//! Console command: `dart test` runs the built-in hello module. Reports the
-//! free kernel heap (the SRAM gap for the full module) and the failing stage.
+//! Minimal substring check (avoids pulling in <string.h> here).
+static bool prv_str_contains(const char *hay, const char *needle) {
+  if (!hay || !needle) {
+    return false;
+  }
+  for (; *hay; hay++) {
+    const char *a = hay, *b = needle;
+    while (*a && *b && *a == *b) {
+      a++;
+      b++;
+    }
+    if (!*b) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//! Console command: `dart test` runs the built-in hello module (which computes 0+1+..+9 and prints
+//! "sum=45"). Reports the free kernel heap, the failing stage, AND asserts the literal computed
+//! result -- "OK" alone only means no WASM trap, which a silently-corrupted PSRAM heap could still
+//! produce with a wrong value.
 void command_dart_test(void) {
-  char buf[128];
+  char buf[160];
   unsigned int used, free_bytes, max_free;
   heap_calc_totals(kernel_heap_get(), &used, &free_bytes, &max_free);
   prompt_send_response_fmt(buf, sizeof(buf),
                            "kernel heap: free=%u max_block=%u (module=%u)",
                            free_bytes, max_free, (unsigned)g_dart_test_module_size);
+  dart_embedder_clear_last_print();
   bool ok = dart_run_test_module();
   prompt_send_response_fmt(buf, sizeof(buf), "dart: test %s%s%s", ok ? "OK" : "FAILED",
                            s_module_fail[0] ? " - " : "", s_module_fail);
+  const char *out = dart_embedder_last_print();
+  bool sum_ok = ok && prv_str_contains(out, "sum=45");
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: sum=45 %s [print: %s]",
+                           sum_ok ? "VERIFIED" : "NOT VERIFIED", out[0] ? out : "(none)");
 }
 
 //! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
