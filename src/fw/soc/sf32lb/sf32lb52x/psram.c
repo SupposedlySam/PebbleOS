@@ -727,54 +727,63 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // RXCAL (2026-06-28): the real per-boot variable is MISCR.RXCLKINV (the read-capture clock edge),
-      // which the HAL auto-cal + the SiFli vendor NEVER set on the HyperBus path -- it's left at the
-      // DLL2-phase residue, landing usable only ~50/50 (the BAD/GOOD/HANG variance), and even when
-      // usable the un-centered DQS leaves a few marginal random errors (the old -114 PSCLR-only diag's
-      // best_rand=29). Fix: sweep RXCLKINV as the OUTER loop; tap_sweep() centers SCK/DQS within each
-      // phase; score by REAL survival (multirow=16 then dense random==0). Apply the winning phase+tap
-      // so the (uncached @0x60000000) dart pool -- which has no separate init and just inherits the
-      // controller state -- gets a centered strobe. PSCLR clock-reduction stays as a fallback if a
-      // centered phase still isn't fully clean at full clock.
-      char r[220];
-      int off = 0;
-      off += sniprintf(r + off, sizeof(r) - off, "psram RXCAL:");
-      int best_rx = -1;
+      // RXCAL v2 (2026-06-28): center the read strobe by REAL multi-row survival, not the weak 8-word
+      // tap check (-121 saw full w=255 windows -- small reads can't discriminate the strobe). The
+      // dominant per-boot variable is MISCR.RXCLKINV (read-capture edge), never set on the HyperBus
+      // path by the HAL auto-cal or the SiFli vendor (DLL2-phase residue -> ~50/50 BAD/GOOD/HANG +
+      // ~29 marginal random errs even when usable). Sweep RXCLKINV x SCK x DQS, score each (rx,sck,dqs)
+      // by prv_psram_multirow_survive(16)==16 (cheap: 16 scattered rows; m16 good vs m0 bad), pick the
+      // widest passing DQS window's center, validate with the dense random test, apply the winner. The
+      // dart pool (uncached @0x60000000, no separate init) inherits the applied strobe. NO cached-CBUS
+      // burst here -- it can hang on a marginal strobe (the -121 stall). Emit per (rx,sck) window so a
+      // single run yields full data even if no phase is fully clean.
+      static unsigned char pass[256];
+      static const uint8_t scks[] = {1u, 2u, 3u, 4u};
+      char r[120];
+      int best_rx = -1, best_sck = -1, best_dqs = -1;
       uint32_t best_rand = 999999u;
-      for (int rx = 0; rx <= 1; rx++) {
+      for (int rx = 0; rx <= 1 && best_rand != 0u; rx++) {
         prv_psram_set_rxclkinv(rx);
-        int dqs = prv_psram_tap_sweep(emit);
-        uint32_t m = (dqs < 0) ? 0u : prv_psram_multirow_survive(16u);
-        uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 2000u, 0) : 999999u;
-        off += sniprintf(r + off, sizeof(r) - off, " rx%d(dqs%d,m%u,r%u)", rx, dqs, (unsigned)m,
-                         (unsigned)rr);
-        if (rr < best_rand) { best_rand = rr; best_rx = rx; }
-        prompt_watchdog_feed();
-        if (rr == 0u) break;  // this phase is fully clean -> done
-      }
-      // tap_sweep() left the LAST phase's tap applied; re-center on the winning phase so the pool
-      // inherits it.
-      if (best_rx >= 0) {
-        prv_psram_set_rxclkinv(best_rx);
-        (void)prv_psram_tap_sweep(emit);
-      }
-      // Fallback: a centered phase that still isn't fully clean at full clock -> try clock reduction.
-      if (best_rand != 0u && best_rx >= 0) {
-        static const uint32_t ps[] = {2u, 4u, 8u, 16u};
-        for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) {
-          s_psram_handle.Instance->PSCLR = ps[i];
-          __DSB();
-          uint32_t m = prv_psram_multirow_survive(16u);
-          uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 2000u, 0) : 999999u;
-          off += sniprintf(r + off, sizeof(r) - off, " p%u(r%u)", (unsigned)ps[i], (unsigned)rr);
-          if (rr < best_rand) { best_rand = rr; }
+        for (unsigned si = 0; si < sizeof(scks) / sizeof(scks[0]) && best_rand != 0u; si++) {
+          HAL_MPI_SET_SCK(&s_psram_handle, scks[si], 0);
+          for (int dqs = 0; dqs < 256; dqs++) {
+            HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
+            HAL_Delay_us(10);
+            __DSB();
+            pass[dqs] = (prv_psram_multirow_survive(16u) >= 16u) ? 1u : 0u;
+            if ((dqs & 0x1f) == 0) { prompt_watchdog_feed(); }
+          }
+          int lo = -1, hi = -1;
+          int center = psram_pick_tap_center(pass, 256, &lo, &hi);
+          uint32_t rr = 999999u;
+          if (center >= 0) {
+            HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)center);
+            HAL_Delay_us(50);
+            __DSB();
+            rr = prv_psram_random_test(256u * 1024u, 2000u, 0);
+            if (rr < best_rand) {
+              best_rand = rr;
+              best_rx = rx;
+              best_sck = (int)scks[si];
+              best_dqs = center;
+            }
+          }
+          sniprintf(r, sizeof(r), "psram RXCAL rx%d sck%u: win[%d..%d] c=%d rand=%u", rx,
+                    (unsigned)scks[si], lo, hi, center, (unsigned)rr);
+          emit(r);
           prompt_watchdog_feed();
-          if (rr == 0u) break;
         }
       }
-      uint32_t cb = prv_psram_cbus_break(256u * 1024u);  // cached-CBUS info (the pool is uncached SBUS)
-      off += sniprintf(r + off, sizeof(r) - off, " best_rx=%d best_rand=%u cbusK=%u ready=%u", best_rx,
-                       (unsigned)best_rand, (unsigned)(cb / 1024u), (unsigned)(best_rand == 0u));
+      // Apply the winning (rxclkinv, sck, dqs) so the dart pool inherits a centered strobe.
+      if (best_dqs >= 0) {
+        prv_psram_set_rxclkinv(best_rx);
+        HAL_MPI_SET_SCK(&s_psram_handle, (uint8_t)best_sck, 0);
+        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)best_dqs);
+        HAL_Delay_us(50);
+        __DSB();
+      }
+      sniprintf(r, sizeof(r), "psram RXCAL: best_rx=%d sck=%d dqs=%d best_rand=%u ready=%u", best_rx,
+                best_sck, best_dqs, (unsigned)best_rand, (unsigned)(best_rand == 0u));
       emit(r);
       s_psram_ready = (best_rand == 0u);
     }
