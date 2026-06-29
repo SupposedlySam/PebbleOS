@@ -17,3 +17,9 @@ const char *dart_embedder_last_print(void);
 
 //! Clear the captured print() buffer (call before running a module to avoid a stale match).
 void dart_embedder_clear_last_print(void);
+
+//! Drain the Dart event loop (microtasks + timers queued via queueMicrotask/scheduleOnce) until
+//! both queues empty or a guard trips. Call after the module's main() returns (to run runApp's
+//! deferred warm-up frame) and after each injected input event. @param env/inst the running
+//! module's exec env + instance.
+void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst);
