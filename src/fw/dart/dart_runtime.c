@@ -5,12 +5,11 @@
 #include "dart_embedder.h"
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
-/* NOTE: counter_device_module.h (the ~1.18MB stripped Flutter counter) is NOT
-   embedded: the obelix firmware FLASH partition is 3MB and already ~2.07MB used,
-   so the module overflows it by ~115KB. The module must load from the watch's
-   storage flash (PFS/resource) instead -- see dart_app_start's buffer arg + the
-   M3_PLAN. command_dart_flutter is wired to dart_app_start; the module source
-   (storage load) is the remaining piece before it can run on-device. */
+/* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
+   partition (fw is ~2.07MB), so it is NOT embedded -- it is pushed to the watch's
+   storage flash as the PFS file "counter.wasm" and loaded at runtime (see
+   prv_load_flutter_module + M3_PLAN). */
+#include "pbl/services/filesystem/pfs.h"
 
 #include "console/dbgserial.h"
 #include "console/prompt.h"
@@ -285,23 +284,20 @@ void dart_app_stop(void) {
   s_app_inject_tap = NULL;
 }
 
-bool dart_app_start(const uint8_t *wasm_buf, uint32_t wasm_size) {
+bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
   s_module_fail[0] = '\0';
   if (s_app_inst) {
     dart_app_stop(); /* one resident app at a time */
   }
   if (!dart_runtime_init()) {
+    wasm_runtime_free(wasm_buf);
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     return false;
   }
-  /* WAMR rewrites the load buffer in place -> copy flash-resident module to RAM. */
-  s_app_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
-  if (!s_app_buf) {
-    snprintf(s_module_fail, sizeof(s_module_fail), "no RAM for %u-byte copy", (unsigned)wasm_size);
-    return false;
-  }
-  memcpy(s_app_buf, wasm_buf, wasm_size);
+  /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
+     rewrites the load buffer in place; dart_app_stop frees it. */
+  s_app_buf = wasm_buf;
   s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!s_app_module) {
     snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
@@ -396,22 +392,49 @@ void command_dart_test(void) {
 //! drives it. The ~1.18MB module is too big to embed in the 3MB firmware FLASH,
 //! so it loads from the watch's storage flash; prv_load_flutter_module() returns
 //! the buffer (NULL until the storage-load path is wired).
-static const uint8_t *prv_load_flutter_module(uint32_t *size_out) {
+//! Load the Flutter module from the PFS file "counter.wasm" (pushed to the watch
+//! via PULSE bulk-io) into a RAM buffer the caller owns. Uses the WAMR pool
+//! allocator (PSRAM) since the module is ~1.18MB; needs the runtime initialized
+//! first. @return the buffer (free with wasm_runtime_free) or NULL if absent.
+static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   *size_out = 0;
-  return NULL; /* TODO(M3): load counter_device.wasm from PFS/resource storage */
+  if (!dart_runtime_init()) {
+    return NULL;
+  }
+  int fd = pfs_open("counter.wasm", OP_FLAG_READ, 0 /*file_type*/, 0);
+  if (fd < 0) {
+    return NULL; /* not pushed to PFS yet */
+  }
+  size_t sz = pfs_get_file_size(fd);
+  uint8_t *buf = (sz > 0) ? (uint8_t *)wasm_runtime_malloc(sz) : NULL;
+  if (!buf) {
+    pfs_close(fd);
+    return NULL;
+  }
+  int rd = pfs_read(fd, buf, sz);
+  pfs_close(fd);
+  if (rd != (int)sz) {
+    wasm_runtime_free(buf);
+    return NULL;
+  }
+  *size_out = (uint32_t)sz;
+  return buf;
 }
+
+//! `dart flutter`: load counter.wasm from PFS and start the resident app,
+//! rendering frame 0 ("0"). The instance stays alive so `dart tap` (or a button)
+//! drives it.
 void command_dart_flutter(void) {
   char buf[160];
   uint32_t size = 0;
-  const uint8_t *mod = prv_load_flutter_module(&size);
+  uint8_t *mod = prv_load_flutter_module(&size);
   if (!mod) {
-    prompt_send_response("dart: flutter module not available "
-                         "(loads from storage flash; not yet wired)");
+    prompt_send_response("dart: no 'counter.wasm' in PFS -- push it first (see M3_PLAN)");
     return;
   }
-  bool ok = dart_app_start(mod, size);
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s%s%s",
-                           ok ? "OK (frame 0 rendered)" : "FAILED",
+  bool ok = dart_app_start(mod, size); /* takes ownership of mod */
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s (%u bytes)%s%s",
+                           ok ? "OK (frame 0)" : "FAILED", (unsigned)size,
                            s_module_fail[0] ? " - " : "", s_module_fail);
 }
 
