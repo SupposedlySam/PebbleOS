@@ -60,6 +60,15 @@
 #define DART_APP_HEAP_SIZE (12 * 1024)
 #define DART_EXEC_STACK_SIZE (12 * 1024)
 
+/* The Flutter framework recurses far deeper than the hello/smoke modules (text +
+   paragraph layout): off-device, a 64KB operand stack OVERFLOWED and 1MB was
+   ample (dart_host.c). These draw from the PSRAM pool on obelix, so 1MB is cheap.
+   Separate from the small DART_APP_* above so the SRAM-friendly smoke tests are
+   unaffected. Tune from on-device behaviour if needed. */
+#define DART_FLUTTER_STACK_SIZE (64 * 1024)        /* instantiate default operand stack */
+#define DART_FLUTTER_HEAP_SIZE (256 * 1024)        /* wasm linear-memory app heap */
+#define DART_FLUTTER_EXEC_STACK_SIZE (1024 * 1024) /* exec_env operand stack (the deep one) */
+
 static bool s_initialized = false;
 
 /* WASM memory source. A real dart2wasm module needs far more than the SRAM
@@ -303,13 +312,13 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
     goto fail;
   }
-  s_app_inst = wasm_runtime_instantiate(s_app_module, DART_APP_STACK_SIZE,
-                                        DART_APP_HEAP_SIZE, error_buf, sizeof(error_buf));
+  s_app_inst = wasm_runtime_instantiate(s_app_module, DART_FLUTTER_STACK_SIZE,
+                                        DART_FLUTTER_HEAP_SIZE, error_buf, sizeof(error_buf));
   if (!s_app_inst) {
     snprintf(s_module_fail, sizeof(s_module_fail), "instantiate: %.70s", error_buf);
     goto fail;
   }
-  s_app_exec_env = wasm_runtime_create_exec_env(s_app_inst, DART_EXEC_STACK_SIZE);
+  s_app_exec_env = wasm_runtime_create_exec_env(s_app_inst, DART_FLUTTER_EXEC_STACK_SIZE);
   if (!s_app_exec_env) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
