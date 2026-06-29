@@ -298,6 +298,8 @@ extern void command_log_ring_dump(void);
 #ifdef CONFIG_DART_RUNTIME
 extern void command_dart_test(void);
 extern void command_dart_wasm(void);
+extern void command_dart_flutter(void);
+extern void command_dart_tap(void);
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
 extern void command_psram(const char *div_str);  // sf32lb52x PSRAM bring-up
 #endif
@@ -310,6 +312,8 @@ static const Command s_prompt_commands[] = {
 #ifdef CONFIG_DART_RUNTIME
   { "dart test", command_dart_test, 0 },
   { "dart wasm", command_dart_wasm, 0 },
+  { "dart flutter", command_dart_flutter, 0 },
+  { "dart tap", command_dart_tap, 0 },
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
   { "psram", command_psram, 1 },
 #endif

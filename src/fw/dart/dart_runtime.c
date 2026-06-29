@@ -5,6 +5,12 @@
 #include "dart_embedder.h"
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
+/* NOTE: counter_device_module.h (the ~1.18MB stripped Flutter counter) is NOT
+   embedded: the obelix firmware FLASH partition is 3MB and already ~2.07MB used,
+   so the module overflows it by ~115KB. The module must load from the watch's
+   storage flash (PFS/resource) instead -- see dart_app_start's buffer arg + the
+   M3_PLAN. command_dart_flutter is wired to dart_app_start; the module source
+   (storage load) is the remaining piece before it can run on-device. */
 
 #include "console/dbgserial.h"
 #include "console/prompt.h"
@@ -383,6 +389,39 @@ void command_dart_test(void) {
   bool sum_ok = ok && prv_str_contains(out, "sum=45");
   prompt_send_response_fmt(buf, sizeof(buf), "dart: sum=45 %s [print: %s]",
                            sum_ok ? "VERIFIED" : "NOT VERIFIED", out[0] ? out : "(none)");
+}
+
+//! `dart flutter`: start the resident Flutter counter app and render frame 0
+//! ("0") to the screen, keeping the instance alive so `dart tap` (or a button)
+//! drives it. The ~1.18MB module is too big to embed in the 3MB firmware FLASH,
+//! so it loads from the watch's storage flash; prv_load_flutter_module() returns
+//! the buffer (NULL until the storage-load path is wired).
+static const uint8_t *prv_load_flutter_module(uint32_t *size_out) {
+  *size_out = 0;
+  return NULL; /* TODO(M3): load counter_device.wasm from PFS/resource storage */
+}
+void command_dart_flutter(void) {
+  char buf[160];
+  uint32_t size = 0;
+  const uint8_t *mod = prv_load_flutter_module(&size);
+  if (!mod) {
+    prompt_send_response("dart: flutter module not available "
+                         "(loads from storage flash; not yet wired)");
+    return;
+  }
+  bool ok = dart_app_start(mod, size);
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s%s%s",
+                           ok ? "OK (frame 0 rendered)" : "FAILED",
+                           s_module_fail[0] ? " - " : "", s_module_fail);
+}
+
+//! `dart tap`: inject a tap at the screen center into the resident app -> the
+//! counter increments and re-renders. Mirrors a physical button/touch press.
+void command_dart_tap(void) {
+  char buf[160];
+  bool ok = dart_app_inject_tap(100.0, 114.0);
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: tap %s",
+                           ok ? "OK (re-rendered)" : "FAILED (no app running?)");
 }
 
 //! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
