@@ -129,12 +129,19 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // the unambiguous low-clock latency code (freq<=85MHz branch) and the data-valid window is far
   // wider -> real reads should land. If w0/USABLE come back correct here, the wall was read latency,
   // not silicon. Two-step ramp 120->144 (a single high step may not lock; 144 is well within range).
-  emit("psram step: EnableDLL2(120) call"); HAL_Delay_us(20000);
-  HAL_RCC_HCPU_EnableDLL2(120000000);
-  emit("psram step: EnableDLL2(120) ret"); HAL_Delay_us(20000);
+  // CLOCK FIX (2026-06-28): the vendor (boot_flash.c:386) runs DLL2 @ 288MHz for 52x PSRAM. The
+  // HyperBus path forces PSCLR=1 (HAL_OPI_PSRAM_Init ignores the div arg -- "OPI PSRAM do not care"),
+  // so the MPI controller = DLL2/1 = 288MHz and the cal clock = 288/2 = 144MHz; HAL_HYPER_PSRAM_Init
+  // then auto-selects the matching 144MHz CR0 read-latency code (0x178f). We were at DLL2=144 ->
+  // controller 144MHz, cal clock 72MHz, CR0 0xe78f (the <=85MHz code) -- a coherent-but-WRONG pair:
+  // the delay-line cal couldn't lock at the half clock (CALCR.DONE=0 -> garbage SCK/DQS -> per-boot
+  // variance + marginal reads). Ramp 144->288 (24MHz DLL step; both quantize) so the cal locks.
   emit("psram step: EnableDLL2(144) call"); HAL_Delay_us(20000);
   HAL_RCC_HCPU_EnableDLL2(144000000);
   emit("psram step: EnableDLL2(144) ret"); HAL_Delay_us(20000);
+  emit("psram step: EnableDLL2(288) call"); HAL_Delay_us(20000);
+  HAL_RCC_HCPU_EnableDLL2(288000000);
+  emit("psram step: EnableDLL2(288) ret"); HAL_Delay_us(20000);
   {
     char clkbuf[128];
     uint32_t dll2_hz = HAL_RCC_HCPU_GetDLL2Freq();
@@ -206,21 +213,19 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // OPI-framing DONE=0 flip to HB-framing DONE=1. The diag's later CALCR read (ships reliably)
   // reflects this post-re-cal state; these in-init emits may batch away.
   if (s_psram_init_res == HAL_OK) {
-    char cb[112];
+    // The HAL ran its read-strobe cal (a pure delay-line lock, HAL_MPI_OPSRAM_CAL_DELAY) INSIDE
+    // HAL_OPI_PSRAM_Init at cal clock = controller/2 (it sets PSCLR=2 during the cal). With the
+    // controller now at the vendor 288MHz (-> 144MHz cal clock) the delay line should LOCK and
+    // CALCR.DONE assert (it read 0 at our old 72MHz cal clock). We do NOT re-run the cal:
+    // HAL_MPI_OPSRAM_AUTO_CAL is the SAME routine (not a separate "HB-framing" cal -- that premise
+    // was wrong); re-running it post-init only re-applies the same SCK/DQS. Report DONE + the actual
+    // controller clock (HAL_QSPI_GET_CLK) so the clock fix is verifiable on-device.
+    char cb[128];
     uint32_t cc = s_psram_handle.Instance->CALCR;
-    sniprintf(cb, sizeof(cb), "psram CAL(init,OPI-framing): CALCR=0x%08x DONE=%u DELAY=%u", (unsigned)cc,
-              (unsigned)((cc & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
+    uint32_t ctlr = HAL_QSPI_GET_CLK(&s_psram_handle);
+    sniprintf(cb, sizeof(cb), "psram CAL: ctlr=%uHz CALCR=0x%08x DONE=%u DELAY=%u", (unsigned)ctlr,
+              (unsigned)cc, (unsigned)((cc & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
               (unsigned)((cc & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos));
-    emit(cb);
-    uint8_t rsck = 0, rdqs = 0;
-    int calres = HAL_MPI_OPSRAM_AUTO_CAL(&s_psram_handle, &rsck, &rdqs);
-    uint32_t cc2 = s_psram_handle.Instance->CALCR;
-    sniprintf(cb, sizeof(cb),
-              "psram CAL(recal,HB-framing): res=%d CALCR=0x%08x DONE=%u DELAY=%u sck=%u dqs=%u",
-              calres, (unsigned)cc2,
-              (unsigned)((cc2 & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
-              (unsigned)((cc2 & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
-              (unsigned)rsck, (unsigned)rdqs);
     emit(cb);
   }
   // NOTE: earlier builds (-62..-65) overrode RBSIZE/CR0/CSLMAX here to chase a ~1-4KB "usable"
@@ -326,17 +331,10 @@ static int prv_psram_tap_sweep(PsramEmitFn emit) {
   return best_center;
 }
 
-//! Set the read-capture clock-edge select (MISCR.RXCLKINV, bit 24). The HAL auto-cal and the SiFli
-//! vendor reference never write this on the HyperBus/OPI path (only the QSPI path sets it, freq>60MHz),
-//! so it's left at the per-boot DLL2-phase residue -- the dominant ~50/50 per-boot variable behind the
-//! BAD/GOOD/HANG variance. The diag sweeps it explicitly; the HAL exposes no HyperBus setter for it.
-static void prv_psram_set_rxclkinv(int inv) {
-  uint32_t m = s_psram_handle.Instance->MISCR;
-  m &= ~MPI_MISCR_RXCLKINV_Msk;
-  if (inv) { m |= MPI_MISCR_RXCLKINV_Msk; }
-  s_psram_handle.Instance->MISCR = m;
-  __DSB();
-}
+// NOTE: an earlier build added prv_psram_set_rxclkinv() to sweep MISCR.RXCLKINV -- removed. On 52x
+// the vendor never sets RXCLKINV on the HyperBus path (it stays 0); writing it post-init wedged the
+// controller. The real per-boot fix is the controller-clock correction in prv_psram_init (DLL2 288MHz
+// so the in-HAL delay-line cal locks), not a strobe sweep.
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
@@ -727,63 +725,19 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // RXCAL v3 (2026-06-28, residue-first + coarse): v2's full 256-DQS x 4-SCK x 2-RXCLKINV sweep
-      // was impractically slow -- forcing the WRONG RXCLKINV phase makes every read wait a long WDTR
-      // timeout (~tens of ms each), so a 256-point sweep on the bad phase took >6 min with no output
-      // (which itself CONFIRMS RXCLKINV is the dominant variable). Fix: test the CURRENT (residue)
-      // RXCLKINV phase FIRST -- the watch booted on it so its reads are fast -- with a COARSE DQS step;
-      // only fall back to the other phase if the residue phase has no clean window. Score by
-      // prv_psram_multirow_survive(16)==16 (real discriminator), pick the window center, validate with
-      // the dense random test, apply the winner. Keep the init's SCK. The dart pool (uncached
-      // @0x60000000, no separate init) inherits the applied strobe. Emits per phase.
-      static unsigned char pass[32];  // DQS sampled coarsely every 8 (0,8,..248)
+      // CLOCK-FIX TEST (2026-06-28): with the controller now at the vendor 288MHz, the in-HAL cal
+      // locks (CALCR.DONE=1) and sets a correct SCK/DQS, so the read strobe is already centered --
+      // NO sweep needed (and sweeping/ writing RXCLKINV post-init WEDGES the controller -- the dead
+      // ends -121..-123). Just VERIFY: multi-row survival + a dense random read-back over the 256KB
+      // the pool uses. ready = fully clean (random==0). The dart pool (uncached @0x60000000, no
+      // separate init) inherits this controller state directly.
       char r[120];
-      uint32_t residue = (s_psram_handle.Instance->MISCR & MPI_MISCR_RXCLKINV_Msk) ? 1u : 0u;
-      int rx_order[2] = {(int)residue, (int)(residue ^ 1u)};  // booted phase first (fast reads)
-      int best_rx = -1, best_dqs = -1;
-      uint32_t best_rand = 999999u;
-      for (int oi = 0; oi < 2 && best_rand != 0u; oi++) {
-        int rx = rx_order[oi];
-        prv_psram_set_rxclkinv(rx);
-        for (int k = 0; k < 32; k++) {
-          HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)(k * 8));
-          HAL_Delay_us(10);
-          __DSB();
-          pass[k] = (prv_psram_multirow_survive(16u) >= 16u) ? 1u : 0u;
-          prompt_watchdog_feed();
-        }
-        int lo = -1, hi = -1;
-        int ck = psram_pick_tap_center(pass, 32, &lo, &hi);
-        uint32_t rr = 999999u;
-        int dqs = -1;
-        if (ck >= 0) {
-          dqs = ck * 8;
-          HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
-          HAL_Delay_us(50);
-          __DSB();
-          rr = prv_psram_random_test(256u * 1024u, 2000u, 0);
-          if (rr < best_rand) {
-            best_rand = rr;
-            best_rx = rx;
-            best_dqs = dqs;
-          }
-        }
-        sniprintf(r, sizeof(r), "psram RXCAL rx%d: win[%d..%d] dqs=%d rand=%u", rx, lo * 8, hi * 8, dqs,
-                  (unsigned)rr);
-        emit(r);
-        prompt_watchdog_feed();
-      }
-      // Apply the winning (rxclkinv, dqs) so the dart pool inherits a centered strobe.
-      if (best_dqs >= 0) {
-        prv_psram_set_rxclkinv(best_rx);
-        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)best_dqs);
-        HAL_Delay_us(50);
-        __DSB();
-      }
-      sniprintf(r, sizeof(r), "psram RXCAL: best_rx=%d dqs=%d best_rand=%u ready=%u", best_rx, best_dqs,
-                (unsigned)best_rand, (unsigned)(best_rand == 0u));
+      uint32_t m = prv_psram_multirow_survive(16u);
+      uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 8000u, 0) : 999999u;
+      sniprintf(r, sizeof(r), "psram TEST: multirow=%u/16 random=%u ready=%u", (unsigned)m,
+                (unsigned)rr, (unsigned)(rr == 0u));
       emit(r);
-      s_psram_ready = (best_rand == 0u);
+      s_psram_ready = (rr == 0u);
     }
     (void)prv_psram_persist_after;
     (void)prv_psram_persist_after_reads;
