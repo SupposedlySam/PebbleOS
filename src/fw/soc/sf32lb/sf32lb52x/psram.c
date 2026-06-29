@@ -326,6 +326,18 @@ static int prv_psram_tap_sweep(PsramEmitFn emit) {
   return best_center;
 }
 
+//! Set the read-capture clock-edge select (MISCR.RXCLKINV, bit 24). The HAL auto-cal and the SiFli
+//! vendor reference never write this on the HyperBus/OPI path (only the QSPI path sets it, freq>60MHz),
+//! so it's left at the per-boot DLL2-phase residue -- the dominant ~50/50 per-boot variable behind the
+//! BAD/GOOD/HANG variance. The diag sweeps it explicitly; the HAL exposes no HyperBus setter for it.
+static void prv_psram_set_rxclkinv(int inv) {
+  uint32_t m = s_psram_handle.Instance->MISCR;
+  m &= ~MPI_MISCR_RXCLKINV_Msk;
+  if (inv) { m |= MPI_MISCR_RXCLKINV_Msk; }
+  s_psram_handle.Instance->MISCR = m;
+  __DSB();
+}
+
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
 //! USABLE-SIZE PROBE (non-caching). A single write-one/read-one passes anywhere and a 1KB
@@ -715,33 +727,54 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
     // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // -114 CLKCLEAN: on a GOOD boot, lowering the clock helps (-112 data: pNORM=15, p2=16, but the
-      // dense random test still had ~99 errs because the old diag STOPPED at the first PSCLR with
-      // multirow=16). Now sweep ALL PSCLR {1,2,4,8,16}; for each that passes multirow=16, run the dense
-      // random test; pick the FIRST (highest) clock that is FULLY CLEAN (random==0). ready = a clean
-      // clock exists -> the WAMR/Dart pool can use the PSRAM -> dart test -> sum=45. This decisively
-      // answers "is the PSRAM usable on a good boot with clock reduction?" (random n=2000 for speed).
-      char r[200];
+      // RXCAL (2026-06-28): the real per-boot variable is MISCR.RXCLKINV (the read-capture clock edge),
+      // which the HAL auto-cal + the SiFli vendor NEVER set on the HyperBus path -- it's left at the
+      // DLL2-phase residue, landing usable only ~50/50 (the BAD/GOOD/HANG variance), and even when
+      // usable the un-centered DQS leaves a few marginal random errors (the old -114 PSCLR-only diag's
+      // best_rand=29). Fix: sweep RXCLKINV as the OUTER loop; tap_sweep() centers SCK/DQS within each
+      // phase; score by REAL survival (multirow=16 then dense random==0). Apply the winning phase+tap
+      // so the (uncached @0x60000000) dart pool -- which has no separate init and just inherits the
+      // controller state -- gets a centered strobe. PSCLR clock-reduction stays as a fallback if a
+      // centered phase still isn't fully clean at full clock.
+      char r[220];
       int off = 0;
-      off += sniprintf(r + off, sizeof(r) - off, "psram CLKCLEAN:");
-      uint32_t best_p = 0u, best_rand = 999999u;
-      static const uint32_t ps[] = {1u, 2u, 4u, 8u, 16u};
-      for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) {
-        s_psram_handle.Instance->PSCLR = ps[i];
-        __DSB();
-        uint32_t m = prv_psram_multirow_survive(16u);
+      off += sniprintf(r + off, sizeof(r) - off, "psram RXCAL:");
+      int best_rx = -1;
+      uint32_t best_rand = 999999u;
+      for (int rx = 0; rx <= 1; rx++) {
+        prv_psram_set_rxclkinv(rx);
+        int dqs = prv_psram_tap_sweep(emit);
+        uint32_t m = (dqs < 0) ? 0u : prv_psram_multirow_survive(16u);
         uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 2000u, 0) : 999999u;
-        off += sniprintf(r + off, sizeof(r) - off, " p%u(m%u,r%u)", (unsigned)ps[i], (unsigned)m,
+        off += sniprintf(r + off, sizeof(r) - off, " rx%d(dqs%d,m%u,r%u)", rx, dqs, (unsigned)m,
                          (unsigned)rr);
-        if (rr < best_rand) { best_rand = rr; best_p = ps[i]; }
+        if (rr < best_rand) { best_rand = rr; best_rx = rx; }
         prompt_watchdog_feed();
-        if (rr == 0u) break;  // found a fully-clean clock -> use it
+        if (rr == 0u) break;  // this phase is fully clean -> done
       }
-      if (best_p == 0u) best_p = 1u;
-      s_psram_handle.Instance->PSCLR = best_p;
-      __DSB();
-      off += sniprintf(r + off, sizeof(r) - off, " best_p=%u best_rand=%u ready=%u", (unsigned)best_p,
-                       (unsigned)best_rand, (unsigned)(best_rand == 0u));
+      // tap_sweep() left the LAST phase's tap applied; re-center on the winning phase so the pool
+      // inherits it.
+      if (best_rx >= 0) {
+        prv_psram_set_rxclkinv(best_rx);
+        (void)prv_psram_tap_sweep(emit);
+      }
+      // Fallback: a centered phase that still isn't fully clean at full clock -> try clock reduction.
+      if (best_rand != 0u && best_rx >= 0) {
+        static const uint32_t ps[] = {2u, 4u, 8u, 16u};
+        for (unsigned i = 0; i < sizeof(ps) / sizeof(ps[0]); i++) {
+          s_psram_handle.Instance->PSCLR = ps[i];
+          __DSB();
+          uint32_t m = prv_psram_multirow_survive(16u);
+          uint32_t rr = (m >= 16u) ? prv_psram_random_test(256u * 1024u, 2000u, 0) : 999999u;
+          off += sniprintf(r + off, sizeof(r) - off, " p%u(r%u)", (unsigned)ps[i], (unsigned)rr);
+          if (rr < best_rand) { best_rand = rr; }
+          prompt_watchdog_feed();
+          if (rr == 0u) break;
+        }
+      }
+      uint32_t cb = prv_psram_cbus_break(256u * 1024u);  // cached-CBUS info (the pool is uncached SBUS)
+      off += sniprintf(r + off, sizeof(r) - off, " best_rx=%d best_rand=%u cbusK=%u ready=%u", best_rx,
+                       (unsigned)best_rand, (unsigned)(cb / 1024u), (unsigned)(best_rand == 0u));
       emit(r);
       s_psram_ready = (best_rand == 0u);
     }
