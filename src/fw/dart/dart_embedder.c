@@ -11,6 +11,12 @@
 #include "kernel/pbl_malloc.h"
 #include "system/logging.h"
 
+#include "applib/graphics/framebuffer.h"
+#include "applib/graphics/gcolor_definitions.h"
+#include "applib/graphics/gtypes.h"
+#include "pbl/services/compositor/compositor.h"
+#include "pbl/services/compositor/compositor_display.h"
+
 #include "wasm_export.h"
 #include "gc_export.h"
 
@@ -644,6 +650,49 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) 
   prv_ev_release_roots(env);
 }
 
+/* ---- M3 present-frame + per-watch geometry bridges ---- */
+
+static void prv_present_complete(void) {}
+
+/* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the system
+   framebuffer, downconverting each pixel to the panel's GColor8, then push it to
+   the display. Clamps to the framebuffer bounds if the source size differs. */
+static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
+                              int32_t w, int32_t h) {
+  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  uint8_t *fb = (uint8_t *)bmp.addr;
+  if (!fb || w <= 0 || h <= 0) {
+    return;
+  }
+  int32_t fbw = bmp.bounds.size.w, fbh = bmp.bounds.size.h;
+  uint16_t rs = bmp.row_size_bytes;
+  int32_t rows = h < fbh ? h : fbh;
+  int32_t cols = w < fbw ? w : fbw;
+  if (w != fbw || h != fbh) {
+    PBL_LOG_ALWAYS("dart present: source %" PRId32 "x%" PRId32 " vs fb %" PRId32
+                   "x%" PRId32 " (clamped)", w, h, fbw, fbh);
+  }
+  for (int32_t y = 0; y < rows; y++) {
+    for (int32_t x = 0; x < cols; x++) {
+      wasm_value_t v;
+      wasm_array_obj_get_elem(argb, (uint32_t)(y * w + x), false, &v);
+      uint32_t px = (uint32_t)v.i32;
+      GColor8 c = GColorFromRGB((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+      fb[y * rs + x] = c.argb;
+    }
+  }
+  framebuffer_dirty_all(compositor_get_framebuffer());
+  compositor_display_update(prv_present_complete);
+}
+static int32_t prv_display_width(wasm_exec_env_t env) {
+  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  return (int32_t)bmp.bounds.size.w;
+}
+static int32_t prv_display_height(wasm_exec_env_t env) {
+  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  return (int32_t)bmp.bounds.size.h;
+}
+
 /* signature chars: 'r' = externref/ref, 'i' = i32, 'I' = i64, 'F' = f64 */
 static NativeSymbol s_dart_natives[] = {
     {"print", prv_print, "(r)"},
@@ -693,6 +742,10 @@ static NativeSymbol s_dart_natives[] = {
     {"regexpMatch", prv_regexp_match, "(rrii)r"},
     {"regexpMatchGetGroup", prv_regexp_match_get_group, "(ri)r"},
     {"regexpMatchGetGroupCount", prv_regexp_match_get_group_count, "(r)i"},
+    /* M3: present-frame + per-watch geometry bridges */
+    {"presentFrame", prv_present_frame, "(rii)"},
+    {"displayWidth", prv_display_width, "()i"},
+    {"displayHeight", prv_display_height, "()i"},
 };
 
 NativeSymbol *dart_embedder_get_natives(uint32_t *count_out) {
