@@ -22,6 +22,21 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size);
 //! from the console to validate the runtime end to end.
 bool dart_run_test_module(void);
 
+//! Start a resident Flutter app from a dart2wasm --standalone module: load,
+//! instantiate, run main(), and drain the event loop so the first frame renders
+//! (via the presentFrame native). The instance stays alive for input injection.
+//! @return true if main() ran and the first frame was pumped without trapping.
+bool dart_app_start(const uint8_t *wasm_buf, uint32_t wasm_size);
+
+//! Deliver a tap at physical pixel (x, y) to the resident app (calls its
+//! injectTap export), then drain the event loop so the resulting frame renders.
+//! No-op if no app is running or it has no injectTap export.
+//! @return true if the tap dispatched without trapping.
+bool dart_app_inject_tap(double x, double y);
+
+//! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
+void dart_app_stop(void);
+
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);

@@ -260,6 +260,92 @@ bool dart_run_test_module(void) {
   return dart_run_module(g_dart_test_module, g_dart_test_module_size);
 }
 
+/* ---- Resident Flutter app ----
+ * Unlike dart_run_module (run-to-completion), this keeps the instance + exec env
+ * alive after main() so input can be injected and the UI re-rendered. main()'s
+ * runApp queues a warm-up frame via a timer; we drain the event loop to render
+ * the first frame, then again after each injected tap. Single resident app. */
+static uint8_t *s_app_buf;
+static wasm_module_t s_app_module;
+static wasm_module_inst_t s_app_inst;
+static wasm_exec_env_t s_app_exec_env;
+static wasm_function_inst_t s_app_inject_tap;
+
+void dart_app_stop(void) {
+  if (s_app_exec_env) { wasm_runtime_destroy_exec_env(s_app_exec_env); s_app_exec_env = NULL; }
+  if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
+  if (s_app_module) { wasm_runtime_unload(s_app_module); s_app_module = NULL; }
+  if (s_app_buf) { wasm_runtime_free(s_app_buf); s_app_buf = NULL; }
+  s_app_inject_tap = NULL;
+}
+
+bool dart_app_start(const uint8_t *wasm_buf, uint32_t wasm_size) {
+  char error_buf[128];
+  s_module_fail[0] = '\0';
+  if (s_app_inst) {
+    dart_app_stop(); /* one resident app at a time */
+  }
+  if (!dart_runtime_init()) {
+    strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
+    return false;
+  }
+  /* WAMR rewrites the load buffer in place -> copy flash-resident module to RAM. */
+  s_app_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
+  if (!s_app_buf) {
+    snprintf(s_module_fail, sizeof(s_module_fail), "no RAM for %u-byte copy", (unsigned)wasm_size);
+    return false;
+  }
+  memcpy(s_app_buf, wasm_buf, wasm_size);
+  s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
+  if (!s_app_module) {
+    snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
+    goto fail;
+  }
+  s_app_inst = wasm_runtime_instantiate(s_app_module, DART_APP_STACK_SIZE,
+                                        DART_APP_HEAP_SIZE, error_buf, sizeof(error_buf));
+  if (!s_app_inst) {
+    snprintf(s_module_fail, sizeof(s_module_fail), "instantiate: %.70s", error_buf);
+    goto fail;
+  }
+  s_app_exec_env = wasm_runtime_create_exec_env(s_app_inst, DART_EXEC_STACK_SIZE);
+  if (!s_app_exec_env) {
+    strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
+    goto fail;
+  }
+  if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
+    snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
+             wasm_runtime_get_exception(s_app_inst));
+    goto fail;
+  }
+  /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
+  dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  s_app_inject_tap = wasm_runtime_lookup_function(s_app_inst, "injectTap");
+  if (!s_app_inject_tap) {
+    PBL_LOG_ALWAYS("dart: app has no injectTap export (input disabled)");
+  }
+  return true;
+fail:
+  dart_app_stop();
+  return false;
+}
+
+bool dart_app_inject_tap(double x, double y) {
+  if (!s_app_exec_env || !s_app_inject_tap) {
+    return false;
+  }
+  /* injectTap(f64 x, f64 y): two doubles occupy 4 arg cells. */
+  uint32_t argv[4];
+  memcpy(&argv[0], &x, sizeof(double));
+  memcpy(&argv[2], &y, sizeof(double));
+  if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_tap, 4, argv)) {
+    PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
+    return false;
+  }
+  /* tap -> setState -> scheduleFrame queued a frame; drain it -> re-render. */
+  dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  return true;
+}
+
 //! Minimal substring check (avoids pulling in <string.h> here).
 static bool prv_str_contains(const char *hay, const char *needle) {
   if (!hay || !needle) {
