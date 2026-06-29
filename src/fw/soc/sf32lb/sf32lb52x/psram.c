@@ -758,23 +758,12 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       // are on a cliff (a 1-2 tap window that reads clean today can drift out with temp/voltage).
       char r[180];
       const uint32_t SPAN = 2u * 1024u * 1024u;  // == the extent dart_runtime hands WAMR (0x60000000)
-      // Margin: sweep DQS (multirow-scored), count passing taps; save/restore the cal's MISCR so the
-      // gate runs at the cal's chosen tap. (Post-init DQS writes are safe; only RXCLKINV writes wedge.)
-      uint32_t saved_miscr = s_psram_handle.Instance->MISCR;
-      int margin = 0;
-      for (int dqs = 0; dqs < 256; dqs += 8) {
-        HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
-        HAL_Delay_us(10);
-        __DSB();
-        if (prv_psram_multirow_survive(8u) >= 8u) {
-          margin++;
-        }
-        prompt_watchdog_feed();
-      }
-      s_psram_handle.Instance->MISCR = saved_miscr;
-      __DSB();
-      // Strong gate at the cal's tap: full extent, the consumer's contiguous burst pattern + inverse,
-      // plus scattered + multirow. ready ONLY if every pattern is fully clean over the WHOLE 2MB.
+      // ISOLATION run (no margin sweep): gate at the cal's UNTOUCHED tap. The margin DQS sweep was
+      // removed as the prime suspect -- perturbing DQS then restoring MISCR may not fully recover the
+      // strobe, which would fail the gate spuriously. This run answers one question: does the
+      // contiguous full-2MB test pass when the strobe is left exactly as the cal set it? The session
+      // drops during the heavy passes, so the verdict is read indirectly via `dart test` (ready -> pool
+      // armed -> sum=45 VERIFIED). The VERIFY emit below may not ship.
       uint32_t m = prv_psram_multirow_survive(16u);
       uint32_t c0 = prv_psram_contig_verify(SPAN, 0);
       uint32_t c1 = prv_psram_contig_verify(SPAN, 1);
@@ -783,10 +772,9 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       uint32_t clk = HAL_QSPI_GET_CLK(&s_psram_handle);
       s_psram_ready = (m >= 16u && c0 == 0u && c1 == 0u && rr == 0u);
       sniprintf(r, sizeof(r),
-                "psram VERIFY: clk=%uHz DONE=%u margin=%d/32 multirow=%u/16 contig=%u inv=%u rand=%u "
-                "ready=%u",
-                (unsigned)clk, (unsigned)done, margin, (unsigned)m, (unsigned)c0, (unsigned)c1,
-                (unsigned)rr, (unsigned)s_psram_ready);
+                "psram VERIFY: clk=%uHz DONE=%u multirow=%u/16 contig=%u inv=%u rand=%u ready=%u",
+                (unsigned)clk, (unsigned)done, (unsigned)m, (unsigned)c0, (unsigned)c1, (unsigned)rr,
+                (unsigned)s_psram_ready);
       emit(r);
     }
     (void)prv_psram_persist_after;
