@@ -474,6 +474,13 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
   }
 }
 
+//! On-demand PSRAM bring-up for in-firmware callers (e.g. the Counter app) that
+//! need PSRAM as bulk memory but have no console sink. Wraps the same idempotent,
+//! crash-safe diagnostic the console uses, discarding the per-step output. Sets
+//! sf32lb52_psram_is_ready(). Call from a deferred/app/console path, NEVER at boot.
+static void prv_emit_noop(const char *line) { (void)line; }
+void sf32lb52_psram_bringup(uint16_t div) { prv_psram_diag(div, prv_emit_noop); }
+
 //! Console command: `psram [div]` (default div=2). Output goes to the console.
 void command_psram(const char *div_str) {
   uint16_t div = 2;

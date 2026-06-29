@@ -744,6 +744,12 @@
       "enum": "DART_DIAG",
       "md_fn": "dart_diag_get_app_info",
       "ifdefs": ["CONFIG_DART_RUNTIME"]
+    },
+    {
+      "id": -201,
+      "enum": "FLUTTER_COUNTER",
+      "md_fn": "flutter_counter_get_app_info",
+      "ifdefs": ["CONFIG_DART_RUNTIME"]
     }
   ],
   "resource_apps": [

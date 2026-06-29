@@ -95,7 +95,10 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
     // fixed cached pool and let real use be the test. If sum=45 works, the cached path is good
     // and the probe just needs fixing; if it corrupts/crashes, cached bulk access is genuinely
     // broken and we move to write-through / tap / DMA.
-    *size = 2u * 1024u * 1024u;
+    // 8MB of the 16MB PSRAM: the Flutter counter needs ~5.5MB (1.18MB module
+    // copy + WAMR load structures + 1MB GC heap + 1MB operand stack + linear
+    // memory). 2MB was too small ("allocate memory failed" during load).
+    *size = 8u * 1024u * 1024u;
     return true;
   }
 #endif
@@ -430,20 +433,26 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   return buf;
 }
 
-//! `dart flutter`: load counter.wasm from PFS and start the resident app,
-//! rendering frame 0 ("0"). The instance stays alive so `dart tap` (or a button)
-//! drives it.
-void command_dart_flutter(void) {
-  char buf[160];
+//! Load the FLUTTER_COUNTER_WASM resource and start the resident Flutter app,
+//! rendering frame 0. PSRAM must already be up (sf32lb52_psram_bringup) so
+//! dart_runtime_init takes the PSRAM pool. Shared by the console command and the
+//! Counter system app. @return true if it started + pumped the first frame.
+bool dart_app_start_flutter_counter(void) {
   uint32_t size = 0;
   uint8_t *mod = prv_load_flutter_module(&size);
   if (!mod) {
-    prompt_send_response("dart: FLUTTER_COUNTER_WASM resource missing or no RAM");
-    return;
+    return false;
   }
-  bool ok = dart_app_start(mod, size); /* takes ownership of mod */
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s (%u bytes)%s%s",
-                           ok ? "OK (frame 0)" : "FAILED", (unsigned)size,
+  return dart_app_start(mod, size); /* takes ownership of mod */
+}
+
+//! `dart flutter`: console entry to start the Flutter counter (renders frame 0).
+//! The instance stays resident so `dart tap` (or the Counter app's buttons) drive it.
+void command_dart_flutter(void) {
+  char buf[160];
+  bool ok = dart_app_start_flutter_counter();
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s%s%s",
+                           ok ? "OK (frame 0)" : "FAILED",
                            s_module_fail[0] ? " - " : "", s_module_fail);
 }
 

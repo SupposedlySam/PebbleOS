@@ -23,6 +23,11 @@
 //! True once `psram` has brought up + verified the controller.
 bool sf32lb52_psram_is_ready(void);
 
+//! On-demand bring-up for in-firmware callers (e.g. the Counter app) with no console
+//! sink. div: 2=144MHz (default). Idempotent + crash-safe; sets sf32lb52_psram_is_ready().
+//! Call from a deferred/app path, NEVER at boot ([[psram-bringup-at-boot-bricks]]).
+void sf32lb52_psram_bringup(uint16_t div);
+
 //! Real usable PSRAM size in bytes, detected by probing the alias-wrap boundary (the
 //! die may be smaller than SF32LB52_PSRAM_SIZE). Returns 0 if PSRAM is not ready. The
 //! result is cached after the first call. NOTE: the probe writes a few marker words at

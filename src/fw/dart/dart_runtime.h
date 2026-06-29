@@ -39,6 +39,11 @@ bool dart_app_inject_tap(double x, double y);
 //! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
 void dart_app_stop(void);
 
+//! Load the FLUTTER_COUNTER_WASM resource + start the resident Flutter counter app
+//! (renders frame 0 via the presentFrame native). PSRAM must be up first. @return
+//! true on success. Used by the `dart flutter` console command and the Counter app.
+bool dart_app_start_flutter_counter(void);
+
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);
