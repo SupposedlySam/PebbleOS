@@ -13,16 +13,10 @@
 //! bsp_psramc_init): clock MPI1 (FLASH1) off DLL2 @ 288 MHz / div 2 = 144 MHz,
 //! then HAL_MPI_PSRAM_Init(handle, cfg, div) with wakeup=0.
 //!
-//! READ-STROBE FIX (2026-06-23): HAL_MPI_PSRAM_Init's internal auto-calibration
-//! (HYPER->OPI->HAL_MPI_OPSRAM_CAL_DELAY) leaves an OFF-CENTER SCK/DQS read tap, so
-//! the first real read hangs (the controller spins on the transfer-complete flag with
-//! no timeout). Web + HAL research (HyperRAM DQS tuning is the classic failure) says
-//! the fix is an EXHAUSTIVE tap sweep -> use the CENTER of the widest passing window.
-//! prv_psram_tap_sweep() does exactly that, AFTER init, using the WDTR-bounded SBUS
-//! reads (which return garbage instead of hanging) -- unlike the earlier abandoned
-//! sweep, which used the UNBOUNDED register reads and wedged (so it looked like a dead
-//! end). We also bounded the HAL's CAL_DELAY spin (bf0_hal_mpi_psram.c) so init itself
-//! can no longer wedge KernelBG.
+//! READ-STROBE FIX: the per-boot read-strobe correctness is owned by the controller-clock
+//! configuration in prv_psram_init (DLL2 ramped to 288MHz so the in-HAL delay-line cal locks),
+//! NOT by a post-init strobe sweep. We also bounded the HAL's CAL_DELAY spin (bf0_hal_mpi_psram.c)
+//! so init itself can no longer wedge KernelBG.
 //!
 //! KEY: do NOT enable LDO18 (it fights the external VDD_SiP rail and corrupts reads),
 //! and bring the controller up exactly ONCE (re-selecting the DLL2 clock while MPI1 is
@@ -34,7 +28,6 @@
 #include "system/logging.h"
 
 #include "psram.h"
-#include "psram_tapwindow.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -240,97 +233,6 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   return s_psram_init_res;
 }
 
-//! Write/read sanity test over the PSRAM window. Returns -1 + the failing index,
-//! else the number of words verified. (Reads always complete once the controller is
-//! up -- a wrong config returns garbage, it does not fault -- so this can't crash.)
-static int prv_psram_test(int words, uint32_t *fail_idx) {
-  volatile uint32_t *p = (volatile uint32_t *)PSRAM_TEST_BASE;
-  for (int i = 0; i < words; i++) {
-    p[i] = 0xA5A50000u + (uint32_t)i;
-  }
-  __DSB();
-  for (int i = 0; i < words; i++) {
-    if (p[i] != 0xA5A50000u + (uint32_t)i) {
-      if (fail_idx) {
-        *fail_idx = (uint32_t)i;
-      }
-      return -1;
-    }
-  }
-  return words;
-}
-
-//! Exhaustive read-strobe tap sweep. The HAL auto-cal leaves an off-center SCK/DQS tap
-//! (so reads hang/corrupt); re-derive the right one empirically. For each SCK candidate,
-//! sweep the full DQS range writing a TAP-UNIQUE marker and reading it back (the SBUS
-//! path is WDTR-bounded -- a bad tap returns garbage, it never hangs), build a pass map,
-//! and pick the CENTER of the widest passing window (psram_pick_tap_center). Leaves the
-//! best (SCK,DQS) applied. Returns the chosen DQS tap, or -1 if nothing reads back.
-//! Tap-unique markers prevent a stale-latch false pass (a bad read returning the prior
-//! tap's data). Must run AFTER HAL_MPI_PSRAM_Init (it arms the WDTR + leaves the
-//! controller up); feeds the KernelBG watchdog across the sweep.
-#define PSRAM_TAP_MAX 256
-static int prv_psram_tap_sweep(PsramEmitFn emit) {
-  char buf[160];
-  volatile uint32_t *p = (volatile uint32_t *)PSRAM_TEST_BASE;
-  static unsigned char pass[PSRAM_TAP_MAX];
-  // SCK candidates: low delays cover the usable range at 144MHz; the auto-cal's own
-  // value is typically small. (DQS is the dominant read-strobe knob; SCK is the outer
-  // loop.) 0 last so a nonzero delay is preferred on a width tie.
-  static const uint8_t sck_cands[] = {1, 2, 3, 4, 5, 6, 8, 0};
-  int best_sck = -1, best_lo = -1, best_hi = -1, best_center = -1, best_w = -1;
-
-  for (unsigned si = 0; si < sizeof(sck_cands); si++) {
-    uint8_t sck = sck_cands[si];
-    HAL_MPI_SET_SCK(&s_psram_handle, sck, 0);
-    for (int dqs = 0; dqs < PSRAM_TAP_MAX; dqs++) {
-      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)dqs);
-      HAL_Delay_us(10);  // strobe settle (HAL uses 50us after a final apply)
-      __DSB();
-      uint32_t marker = 0xC0DE0000u ^ ((uint32_t)sck << 12) ^ ((uint32_t)dqs << 4);
-      bool ok = true;
-      for (int i = 0; i < 8; i++) {
-        p[i] = marker + (uint32_t)i;
-      }
-      __DSB();
-      for (int i = 0; i < 8 && ok; i++) {
-        ok = (p[i] == marker + (uint32_t)i);
-      }
-      pass[dqs] = ok ? 1u : 0u;
-      if ((dqs & 0x1f) == 0) {
-        prompt_watchdog_feed();
-      }
-    }
-    int lo = -1, hi = -1;
-    int center = psram_pick_tap_center(pass, PSRAM_TAP_MAX, &lo, &hi);
-    int width = (center < 0) ? -1 : (hi - lo);
-    sniprintf(buf, sizeof(buf), "psram sweep: sck=%u dqs window=[%d..%d] w=%d",
-              (unsigned)sck, lo, hi, width);
-    emit(buf);
-    if (center >= 0 && width > best_w) {
-      best_w = width;
-      best_sck = sck;
-      best_lo = lo;
-      best_hi = hi;
-      best_center = center;
-    }
-    prompt_watchdog_feed();
-  }
-
-  if (best_center < 0) {
-    emit("psram sweep: NO passing tap at any sck/dqs (not a tap problem -> power/pinmux/latency)");
-    return -1;
-  }
-  HAL_MPI_SET_SCK(&s_psram_handle, (uint8_t)best_sck, 0);
-  HAL_MPI_SET_DQS_DELAY(&s_psram_handle, (uint8_t)best_center);
-  HAL_Delay_us(50);
-  __DSB();
-  sniprintf(buf, sizeof(buf), "psram sweep: CHOSE sck=%d dqs=%d window=[%d..%d] w=%d",
-            best_sck, best_center, best_lo, best_hi, best_w);
-  emit(buf);
-  return best_center;
-}
-
 // NOTE: an earlier build added prv_psram_set_rxclkinv() to sweep MISCR.RXCLKINV -- removed. On 52x
 // the vendor never sets RXCLKINV on the HyperBus path (it stays 0); writing it post-init wedged the
 // controller. The real per-boot fix is the controller-clock correction in prv_psram_init (DLL2 288MHz
@@ -381,26 +283,6 @@ static uint32_t prv_psram_usable_at(uint32_t base_addr, uint32_t max_sz) {
 
 static uint32_t prv_psram_usable_bytes(void) {
   return prv_psram_usable_at(PSRAM_TEST_BASE, SF32LB52_PSRAM_SIZE);
-}
-
-// Single-flush CACHED break-finder: write `max_bytes` to the CBUS (cached) port, clean+invalidate
-// the D-cache ONCE, then read back and return the byte offset of the first mismatch (== max_bytes if
-// all OK). One flush + early-exit read makes it far faster than the doubling probe, so a full
-// SCK/DQS sweep using the cached (back-to-back cache-line) metric fits the flaky console session.
-__attribute__((unused)) static uint32_t prv_psram_cbus_break(uint32_t max_bytes) {
-  volatile uint32_t *base = (volatile uint32_t *)0x10000000u;
-  const uint32_t words = max_bytes / 4u;
-  for (uint32_t i = 0; i < words; i++) {
-    base[i] = 0x5A5A0000u ^ i;
-  }
-  __DSB();
-  SCB_CleanInvalidateDCache();
-  for (uint32_t i = 0; i < words; i++) {
-    if (base[i] != (0x5A5A0000u ^ i)) {
-      return i * 4u;
-    }
-  }
-  return max_bytes;
 }
 
 // HEAP-PATTERN test: scattered small (4B) accesses over a large UNCACHED SBUS span -- the access mode
@@ -468,35 +350,6 @@ static uint32_t prv_psram_contig_verify(uint32_t span_bytes, int invert) {
   return errs;
 }
 
-// ALIASING discriminator: write 16 distinct values at 16KB-spaced (4096-word) offsets across 256KB,
-// read straight back (minimal time, so retention is NOT a factor). errs>0 => far-apart addresses
-// collide => the array aliases (upper address lines unmapped / wrong row-size config), not retention.
-static uint32_t prv_psram_alias_errs(void) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  for (uint32_t s = 0; s < 16u; s++) base[s * 4096u] = 0xA11A0000u ^ s;
-  __DSB();
-  uint32_t errs = 0u;
-  for (uint32_t s = 0; s < 16u; s++) {
-    if (base[s * 4096u] != (0xA11A0000u ^ s)) errs++;
-  }
-  return errs;
-}
-
-// WRITE-PERSISTENCE: write a marker at base[0], do `n` intervening writes to OTHER rows (16KB apart),
-// then read base[0] back. Returns 1 if base[0] survived, 0 if a later cross-row write destroyed it.
-// Sweeping n finds the threshold -- how many cross-row writes a value survives (write-side, not read).
-static uint32_t prv_psram_persist_after(uint32_t n) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  base[0] = 0xAAAA1234u;
-  __DSB();
-  for (uint32_t k = 1; k <= n; k++) {
-    base[k * 4096u] = 0x55550000u ^ k;
-    __DSB();
-    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
-  }
-  return (base[0] == 0xAAAA1234u) ? 1u : 0u;
-}
-
 // Multi-row SEPARATED survival: write `m` markers across m rows (16KB apart), then read them all
 // back; return how many survived (0..m). This is the marginal access pattern (write-all-then-read).
 // Used to score a DQS/SCK tap by REAL persistence, not the confounded contiguous/cached metric.
@@ -515,94 +368,6 @@ static uint32_t prv_psram_multirow_survive(uint32_t m) {
   return ok;
 }
 
-// Like prv_psram_persist_after but the intervening accesses are READS (not writes). Discriminates
-// write-commit failure (survives many reads, dies on writes) vs read-recency (array read only returns
-// recently-touched rows -> dies on reads too).
-static uint32_t prv_psram_persist_after_reads(uint32_t n) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  base[0] = 0xAAAA1234u;
-  __DSB();
-  volatile uint32_t sink = 0u;
-  for (uint32_t k = 1; k <= n; k++) {
-    sink += base[k * 4096u];
-    if ((k & 0x3fu) == 0u) prompt_watchdog_feed();
-  }
-  (void)sink;
-  return (base[0] == 0xAAAA1234u) ? 1u : 0u;
-}
-
-// ADDRESS-WRAP / row-size finder: for each distance D (words), write distinct values at base[0] and
-// base[D] and read BOTH back. base[0] is read AFTER writing base[D] (different address), so a 1-deep
-// write buffer can't fake it. The smallest D where they stop being independent reveals address wrap
-// (row/array addressing broken -> only ~one row reachable). All INDEP => addressing is fine.
-static void prv_psram_wrap_scan(void (*emit_fn)(const char *)) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  char b[96];
-  static const uint32_t ds[] = {64u,    128u,   256u,   512u,   1024u,  2048u,
-                                4096u,  8192u,  16384u, 32768u, 65536u};  // words: 256B .. 256KB
-  for (unsigned i = 0; i < sizeof(ds) / sizeof(ds[0]); i++) {
-    uint32_t D = ds[i];
-    base[0] = 0xAAAA0000u;
-    __DSB();
-    base[D] = 0x55550000u;
-    __DSB();
-    uint32_t v0 = base[0];
-    uint32_t vd = base[D];
-    __DSB();
-    const char *st = (v0 == 0xAAAA0000u && vd == 0x55550000u) ? "INDEP"
-                     : (v0 == 0x55550000u)                    ? "WRAP(0<-D)"
-                                                              : "BAD";
-    sniprintf(b, sizeof(b), "psram WRAP D=%uB: v0=%08x vd=%08x %s", (unsigned)(D * 4u),
-              (unsigned)v0, (unsigned)vd, st);
-    emit_fn(b);
-    prompt_watchdog_feed();
-  }
-}
-
-// GAPPED multi-row test: write `n` markers across distinct rows (16KB spacing) and read them back,
-// with a `gap` of empty iterations (CS# idle-high) between EACH access. -100/-101 showed the array
-// is fully addressable and idle-retains, but tight back-to-back cross-row bursts corrupt -- i.e. the
-// device's distributed refresh is starved during sustained access. Real heap code has natural gaps
-// between accesses; this checks whether a small gap is enough to make multi-row access reliable.
-static uint32_t prv_psram_gapped_retain(uint32_t n, uint32_t gap) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  volatile uint32_t acc = 0u;
-  for (uint32_t s = 0; s < n; s++) {
-    base[s * 4096u] = 0xBEEF0000u ^ s;
-    __DSB();
-    for (uint32_t t = 0; t < gap; t++) acc += t;
-  }
-  __DSB();
-  uint32_t errs = 0u;
-  for (uint32_t s = 0; s < n; s++) {
-    if (base[s * 4096u] != (0xBEEF0000u ^ s)) errs++;
-    for (uint32_t t = 0; t < gap; t++) acc += t;
-  }
-  (void)acc;
-  prompt_watchdog_feed();
-  return errs;
-}
-
-// RETENTION discriminator: write 16 markers, burn `spin` empty iterations with NO PSRAM access (so
-// the device, CS# idle-high, should self-refresh), then read back. errs growing with spin => the
-// self-refresh isn't maintaining the array => fix CR1/refresh config.
-static uint32_t prv_psram_retain_errs(uint32_t spin) {
-  volatile uint32_t *base = (volatile uint32_t *)0x60000000u;
-  for (uint32_t s = 0; s < 16u; s++) base[s * 4096u] = 0xBEEF0000u ^ s;
-  __DSB();
-  volatile uint32_t acc = 0u;
-  for (uint32_t t = 0; t < spin; t++) {
-    acc += t;
-    if ((t & 0x3ffffu) == 0u) prompt_watchdog_feed();
-  }
-  (void)acc;
-  uint32_t errs = 0u;
-  for (uint32_t s = 0; s < 16u; s++) {
-    if (base[s * 4096u] != (0xBEEF0000u ^ s)) errs++;
-  }
-  return errs;
-}
-
 uint32_t sf32lb52_psram_size(void) {
   static uint32_t s_probed_size;  // cached; 0 = not yet probed (or unusable)
   if (!s_psram_ready) {
@@ -617,18 +382,6 @@ uint32_t sf32lb52_psram_size(void) {
 //! Sink for one diagnostic line (console `psram` command). PsramEmitFn is declared
 //! above prv_psram_init so the bring-up can emit per-step markers via the same sink.
 static void prv_emit_console(const char *line) { prompt_send_response(line); }
-
-//! No-op emit sink: used for re-init retries (-110) so the bring-up's per-step markers don't flood
-//! the flaky NO_ENCRYPT console session; only the final summary line is emitted.
-__attribute__((unused)) static void prv_emit_quiet(const char *line) { (void)line; }
-
-// Persist the tap-break sweep result so the diag emits it FIRST on the NEXT psram call. The
-// NO_ENCRYPT console session drops ~3s after connect -- often before a long sweep's result ships.
-// Emitting last run's result up front guarantees observability over the flaky link (fire psram 2
-// twice: run 1 computes, run 2 reports it first then recomputes).
-static uint32_t s_tapbreak_best;  // bytes; 0 = not yet swept
-static uint8_t s_tapbreak_sck;
-static uint8_t s_tapbreak_dqs;
 
 //! Bring the controller up ONCE (idempotent + crash-safe to re-run; re-init would
 //! hang), run the partition-the-failure diagnostic + a write/read test, and emit each
@@ -673,19 +426,10 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     emit(buf);
   }
 
-  // Emit LAST run's tap-break sweep result FIRST -- guaranteed to ship before the ~3s session drop,
-  // even when this run's sweep (below) gets cut off. Fire `psram 2` twice to read it.
-  if (s_tapbreak_best > 0u) {
-    sniprintf(buf, sizeof(buf), "psram TAP-BREAK (prev run): sck=%u dqs=%u break=%uB",
-              (unsigned)s_tapbreak_sck, (unsigned)s_tapbreak_dqs, (unsigned)s_tapbreak_best);
-    emit(buf);
-  }
-
-  // === FAST DIAGNOSTIC (ships before the BLE session drops) ===
-  // The full tap sweep + 64KB taptest below run long, and the no-bond session reliably drops mid-
-  // way, so CR0/USABLE never make it out. Emit the decisive signals FIRST, then return. We judge by
-  // REAL reads, not CALCR.DONE (which never asserts on this part). w0 uses the cal's tap; CR0 should
-  // read back HAL_HYPER_PSRAM_Init's mr0 (72MHz->0xe78f); USABLE says whether BULK works (256KB).
+  // === FAST DIAGNOSTIC (ships before the flaky no-bond console session drops) ===
+  // Emit the decisive readiness signals over the short-lived session: a w0 write/read sanity check at
+  // the cal's tap, a small FAST USABLE probe, then the HARDENED VERIFY gate below. Readiness is judged
+  // by REAL array reads, NOT CALCR.DONE (which never asserts on this part even when reads are clean).
   {
     volatile uint32_t *sb = (volatile uint32_t *)PSRAM_TEST_BASE;
     sb[0] = 0xA5A50000u;
@@ -700,62 +444,12 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
     uint32_t us = prv_psram_usable_at(PSRAM_TEST_BASE, 64u * 1024u);
     sniprintf(buf, sizeof(buf), "psram FAST USABLE (cal tap): SBUS=%uB", (unsigned)us);
     emit(buf);
-    // RBSIZE SWEEP (research-backed, verified-register experiment). Live DCR showed RBSIZE=7 (1KB row
-    // boundary) yet reads break at ~8-32B -- so the controller holds CS# low for a long burst whose
-    // capture goes bad after a few bytes. Shrink RBSIZE so CS# drops + the read command re-issues
-    // every few bytes (RBSIZE=0 -> 8-byte bursts = our working size). Keep the cal's SCK/DQS tap.
-    // Per-RBSIZE lines ship incrementally; the best is persisted + emitted first next call.
-    // -90: RBSIZE 0-2 took us 32B -> 512B (16x); now a 512B plateau == the ~tCSM (4us) refresh window
-    // (CSLMAX=950 cy ~6.6us > tCSM, so CS# is held past the refresh deadline). Pin a small RBSIZE and
-    // sweep CSLMAX DOWN so CS# drops within tCSM -- should push the break past 512B. Other CS-time
-    // fields kept at the dumped baseline (cslmin=6, cshmin=3, trcmin=14). Verified setter SET_CS_TIME.
-    // -91 KEY RETEST: SBUS contiguous reads cap at ~512B (the tCSM refresh window), but the CBUS
-    // CACHED path fetches 32-byte cache lines -- each far under 512B. CBUS was 0 at the OLD RBSIZE=7
-    // (broken burst); at RBSIZE=2 each line fill should land -> transparent MB-scale bulk for the
-    // WAMR heap, sidestepping the contiguous-read ceiling entirely. Set RBSIZE=2 + best CSLMAX(450),
-    // then measure BOTH ports up to 256KB (enough for the ~200KB working set).
-    // -92: CBUS=32B (ONE cache line); SBUS >512B only within a single CS#-low burst. So the
-    // CONTINUATION across a CS# drop (back-to-back read recovery) is the wall -- it kills both >512B
-    // contiguous AND the cache's 2nd line. Recovery = CSHMIN (CS#-high, 4-bit max 15) + TRCMIN
-    // (read-cycle, 5-bit max 31). Pin a fixed tap (cut per-boot cal noise) + RBSIZE=2 (force drops) +
-    // sweep CSHMIN UP with TRCMIN maxed; measure CBUS (the heap path). If a value lets cache lines
-    // continue, CBUS jumps from 32B toward MB.
-    // -93: NO CS#-timing knob fixed the continuation (CBUS stuck at 32B = one cache line). The device
-    // needs a REFRESH every ~512B (tCSM); in FIXED latency the controller mis-times reads when a
-    // refresh extends latency mid-continuation. Try VARIABLE latency -- controller samples RWDS during
-    // CA to detect the refresh-extended latency and adjusts. Clear CR0 fixed-latency bit (0xe78f ->
-    // 0xe787) + HAL_MPI_EN_FIXLAT(0). If the continuation now survives a refresh, CBUS jumps from 32B.
-    // -94 (4-agent research synthesis): REVERT variable latency (it was inconsistent with the fixed
-    // CS-timing). Latency stays FIXED (HAL_MPI_PSRAM_Init set FIXLAT=1 + CR0 fixed). CR1/RXCLKDLY/pins
-    // all RULED OUT by research. The real failure = the read TAP doesn't survive the re-issued read
-    // after a CS# drop (cached 2nd line), and my prior sweeps used a single-burst SBUS metric (WRONG
-    // test). Sweep SCK x DQS measuring the CACHED CBUS multi-line read (the actual failure mode) at
-    // RBSIZE=2, FIXED latency. Find a tap where back-to-back cache lines survive -> CBUS off 32B.
+    // Set the controller row boundary (RBSIZE=2) so CS# drops periodically during reads.
     HAL_FLASH_SET_ROW_BOUNDARY(&s_psram_handle, 2u);
-    // -99 HEAP-PATTERN test: the clock sweep proved the wall is clock-INDEPENDENT (28B cached, 1KB
-    // SBUS at every PSCLR 2..16). It's structural: SUSTAINED bursts fail after ~1 line, but INDIVIDUAL
-    // small reads work. A heap does scattered small accesses -- the working mode. Test that directly
-    // over a 256KB UNCACHED SBUS span (>194KB the module needs). If errs==0, the PSRAM is usable as a
-    // (slow, uncached) heap and we can point the WAMR/Dart pool at 0x60000000.
-    // -101 WRAP SCAN: -100 showed multi-row access fails TIME-INDEPENDENTLY (retain[0]==retain[20M])
-    // => not decay, it's addressing. Find where addresses stop being independent (the real row/array
-    // size). If it wraps at ~1-2KB, only one row is reachable (row-address bits not driven).
-    // -108 SELF-HEAL: the per-boot binary failure is the read-capture phase the cal never sets
-    // (MISCR.RXCLKINV) plus DQS. DLL2 comes up on either phase ~50/50, so a fixed config works only
-    // half the boots. Fix: after cal, SWEEP RXCLKINV x DQS scored by REAL multi-row survival, keep
-    // the winner. Then validate with the dense 256KB scattered (heap-pattern) test and enable the
-    // pool. This makes EVERY boot good regardless of which phase DLL2 picked.
-    // -110: -109 proved a bad boot has NO working timing config (full phase space = 0/16) -> it's not
-    // a tap/phase, the INIT/clock/wake came up bad this boot. Test re-init retry: re-run the full init
-    // (clock, LDO, wake, HAL init, cal) up to 5x; if a fresh init flips bad->good, retry-until-good is
-    // the fix. Use a quiet emit for the retries so the session isn't flooded; report tries + result.
     {
-      // HARDENED VERIFY (2026-06-28): the earlier gate ran SCATTERED reads over 256KB -- the one access
-      // mode already known to pass -- while WAMR uses CONTIGUOUS bursts over the full 2MB pool. Gate on
-      // the access pattern AND extent the consumer actually uses (contiguous, full 2MB, + inverse), and
-      // measure the read-strobe margin: CALCR.DONE reads 0 on this part even when reads are clean, so
-      // the tap is not cal-validated -- the passing-window width tells us whether we have headroom or
-      // are on a cliff (a 1-2 tap window that reads clean today can drift out with temp/voltage).
+      // HARDENED VERIFY: gate on the access pattern AND extent the consumer actually uses -- WAMR runs
+      // CONTIGUOUS bursts over the full 2MB pool, so a scattered/partial test would pass while bulk use
+      // corrupts. Verify contiguous full-2MB + an inverse pass + scattered + multi-row, all clean.
       char r[180];
       const uint32_t SPAN = 2u * 1024u * 1024u;  // == the extent dart_runtime hands WAMR (0x60000000)
       // ISOLATION run (no margin sweep): gate at the cal's UNTOUCHED tap. The margin DQS sweep was
@@ -777,156 +471,7 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
                 (unsigned)s_psram_ready);
       emit(r);
     }
-    (void)prv_psram_persist_after;
-    (void)prv_psram_persist_after_reads;
-    (void)prv_psram_wrap_scan;
-    (void)prv_psram_alias_errs;
-    (void)prv_psram_retain_errs;
-    (void)prv_psram_gapped_retain;
-    return;  // -108 owns s_psram_ready; skip the old tap sweep/taptest below
   }
-
-  // THE FIX: re-derive the read strobe. The HAL auto-cal left an off-center SCK/DQS tap;
-  // sweep for the center of the widest passing window and apply it (WDTR-bounded reads,
-  // can't hang). After this the SBUS read-back below should be correct.
-  emit("psram step: tap sweep");
-  prv_psram_tap_sweep(emit);
-
-  // SBUS read-back PATTERN (post-sweep). MEMORY-MAPPED SBUS read is bounded by the MPI
-  // WDTR (armed in init), so it returns garbage instead of hanging.
-  //  word0 reads word1's value -> read latency shift; a bit-permutation of what we wrote
-  //  -> pinmux/data-lane order; unrelated noise -> power/mode/strobe; correct -> fixed.
-  volatile uint32_t *p0 = (volatile uint32_t *)PSRAM_TEST_BASE;  // SBUS (WDTR-bounded)
-  p0[0] = 0xA5A50000u;
-  p0[1] = 0x0000A5A5u;
-  __DSB();
-  emit("psram step: SBUS read-back");
-  sniprintf(buf, sizeof(buf), "psram w0: wrote A5A50000,0000A5A5 read %08x,%08x",
-            (unsigned)p0[0], (unsigned)p0[1]);
-  emit(buf);
-
-  emit("psram step: SBUS 256-word test");
-  uint32_t fail = 0;
-  int n = prv_psram_test(256, &fail);
-  if (n < 0) {
-    sniprintf(buf, sizeof(buf), "psram test FAIL at word %u", (unsigned)fail);
-  } else {
-    s_psram_ready = true;
-    sniprintf(buf, sizeof(buf), "psram test OK (%d words @0x%08x) - %u MB ready",
-              n, (unsigned)PSRAM_TEST_BASE, PSRAM_MSIZE_MB);
-  }
-  emit(buf);
-
-  // DECISIVE DIAGNOSTIC: read the HyperBus device ID + CR0 back. SAFE now -- HAL_FLASH_READ32 is a
-  // bare DR read (no spin) and HAL_FLASH_SET_CMD's TCF spin is bounded by our patch (the old
-  // "ReadID hangs" was the PRE-patch unbounded TCF). Placed early so it ships before the long tap
-  // sweep. ID0 != 0/0xffff => device answers in HyperBus framing. CR0 should equal HAL_HYPER_PSRAM_
-  // Init's mr0 for the current clock (72MHz -> (14<<12)|0x078f = 0xe78f); if CR0 differs, the latency
-  // write didn't land (byte-swap/framing) -- which would explain zero reads at every tap.
-  if (s_psram_ready) {
-    uint16_t hb_id0 = HAL_HYPER_PSRAM_ReadID(&s_psram_handle, 0);
-    uint16_t hb_cr0 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 0);
-    uint16_t hb_cr1 = HAL_HYPER_PSRAM_ReadCR(&s_psram_handle, 1);
-    sniprintf(buf, sizeof(buf), "psram HB readback: ID0=0x%04x CR0=0x%04x CR1=0x%04x",
-              (unsigned)hb_id0, (unsigned)hb_cr0, (unsigned)hb_cr1);
-    emit(buf);
-  }
-
-  // REAL SIZE: the 256-word test only proves the first 1KB. The die may be smaller than the
-  // configured window and ALIAS (high addresses wrap onto low) -- which corrupts any heap
-  // placed across the full window. Probe the true size by finding the alias-wrap boundary.
-  if (s_psram_ready) {
-    uint32_t usable = sf32lb52_psram_size();  // largest write-all/read-all-reliable region (SBUS)
-    sniprintf(buf, sizeof(buf), "psram USABLE: %u KB (%u MB) reliable of %u MB window (SBUS)",
-              (unsigned)(usable / 1024u), (unsigned)(usable / (1024u * 1024u)), PSRAM_MSIZE_MB);
-    emit(buf);
-    // CBUS (cached port 0x10000000) bulk probe -- the REAL test of cached bulk. The SBUS probe
-    // above bypasses the cache (SBUS is the uncached system-bus alias), so it only measured the
-    // broken uncached long-burst continuation. The SDK routes cached bulk through CBUS, where the
-    // D-cache batches access into 32B cache-line bursts the controller handles. The cacheable MPU
-    // region now sits over CBUS (system_bf0_ap.c). Cap at 1MB to bound exposure if a fill wedges.
-    uint32_t usable_cbus = prv_psram_usable_at(0x10000000u, 1u * 1024u * 1024u);
-    sniprintf(buf, sizeof(buf), "psram USABLE-CBUS: %u KB reliable (cached port 0x10000000)",
-              (unsigned)(usable_cbus / 1024u));
-    emit(buf);
-  }
-
-  // VALIDATE the read-strobe-tap hypothesis instead of assuming it. First report the HARDWARE
-  // auto-cal result: CALCR.DONE (did the calibration complete on this unit?) + the chosen DELAY.
-  // Then SCORE a spread of DQS taps by a REAL 64KB cached write-all/read-all (the trivial 8-word
-  // sweep passes at every tap; sustained bursts are the real test). If some tap PASSES 64KB where
-  // others fail -> the tap IS the lever (worth a full fine sweep); if ALL fail -> the tap is NOT
-  // the cause (look elsewhere / suspect silicon). Leaves DQS at the best-scoring tap for dart.
-  if (s_psram_ready) {
-    sniprintf(buf, sizeof(buf), "psram LDO18: PERI_LDO=0x%08x (EN=%u PD=%u)",
-              (unsigned)hwp_pmuc->PERI_LDO,
-              (unsigned)((hwp_pmuc->PERI_LDO & PMUC_PERI_LDO_EN_LDO18_Msk) ? 1u : 0u),
-              (unsigned)((hwp_pmuc->PERI_LDO & PMUC_PERI_LDO_LDO18_PD_Msk) ? 1u : 0u));
-    emit(buf);
-    uint32_t calcr = s_psram_handle.Instance->CALCR;
-    sniprintf(buf, sizeof(buf), "psram CALCR: DONE=%u DELAY=%u EN=%u (raw=0x%08x)",
-              (unsigned)((calcr & MPI_CALCR_DONE_Msk) >> MPI_CALCR_DONE_Pos),
-              (unsigned)((calcr & MPI_CALCR_DELAY_Msk) >> MPI_CALCR_DELAY_Pos),
-              (unsigned)((calcr & MPI_CALCR_EN_Msk) >> MPI_CALCR_EN_Pos), (unsigned)calcr);
-    emit(buf);
-
-    // NOTE: do NOT read the HyperBus device ID/CR here -- HAL_HYPER_PSRAM_ReadID HANGS KernelBG on
-    // this part (the TCF wait in that path is not bounded by our spin patch). Confirmed on -79: the
-    // diag wedged exactly at the readback. Use real array reads (w0 / USABLE) to judge instead.
-    volatile uint32_t *base = (volatile uint32_t *)PSRAM_TEST_BASE;
-    const uint32_t words = (64u * 1024u) / 4u;
-    static const uint8_t dqs_probe[] = {0u,  16u, 32u,  48u,  64u,  80u,  96u,  112u,
-                                        128u, 144u, 160u, 176u, 192u, 208u, 224u, 240u};
-    uint8_t best_dqs = 0u;
-    uint32_t best_ok = 0u;
-    bool any_pass = false;
-    for (unsigned t = 0; t < sizeof(dqs_probe); t++) {
-      HAL_MPI_SET_DQS_DELAY(&s_psram_handle, dqs_probe[t]);
-      HAL_Delay_us(50);
-      for (uint32_t i = 0; i < words; i++) {
-        base[i] = 0x7A7A0000u ^ i;
-        if ((i & 0x3fffu) == 0u) {
-          prompt_watchdog_feed();
-        }
-      }
-      __DSB();
-      SCB_CleanInvalidateDCache();  // force the read-back to re-fetch from PSRAM, not the cache
-      uint32_t okw = 0u;
-      bool ok = true;
-      for (uint32_t i = 0; i < words; i++) {
-        if (base[i] != (0x7A7A0000u ^ i)) {
-          ok = false;
-          break;
-        }
-        okw++;
-        if ((i & 0x3fffu) == 0u) {
-          prompt_watchdog_feed();
-        }
-      }
-      if (okw > best_ok) {
-        best_ok = okw;
-        best_dqs = dqs_probe[t];
-      }
-      if (ok) {
-        any_pass = true;
-      }
-      sniprintf(buf, sizeof(buf), "psram taptest: dqs=%u %s ok=%u/%u", (unsigned)dqs_probe[t],
-                ok ? "PASS" : "fail", (unsigned)okw, (unsigned)words);
-      emit(buf);
-    }
-    HAL_MPI_SET_DQS_DELAY(&s_psram_handle, best_dqs);
-    HAL_Delay_us(50);
-    sniprintf(buf, sizeof(buf), "psram taptest: BEST dqs=%u ok=%u/%u any_pass=%u",
-              (unsigned)best_dqs, (unsigned)best_ok, (unsigned)words, (unsigned)any_pass);
-    emit(buf);
-  }
-
-  // NOTE: the HYPERBUS register reads (HAL_HYPER_PSRAM_ReadID/ReadCR) are deliberately
-  // NOT called here -- they spin on TCF with no timeout and HANG KernelBG forever (the
-  // read strobe never completes), wedging the console and forcing a reboot every run.
-  // The SBUS read-back + test above is WDTR-bounded (returns garbage, never hangs) and
-  // gives us the partition-the-failure pattern. Restore the register reads only once the
-  // read path is fixed (bounded reads + a working SCK/DQS tap).
 }
 
 //! Console command: `psram [div]` (default div=2). Output goes to the console.
