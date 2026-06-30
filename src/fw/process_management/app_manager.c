@@ -223,12 +223,24 @@ static size_t prv_get_app_segment_size(const PebbleProcessMd *app_md) {
   }
 }
 
+#define APP_STACK_FLUTTER_SIZE (32 * 1024)
+
 static size_t prv_get_app_stack_size(const PebbleProcessMd *app_md) {
 #ifdef CONFIG_MODDABLE_XS
   if (app_md->is_moddable_app) {
     return APP_STACK_JS_SIZE;
   }
 #endif
+  // The Flutter "Counter" app loads a 1.18MB dart2wasm module on the WAMR interpreter;
+  // its deep C call chain overflows the 4K default app stack on the app task (the same
+  // load completes fine from the deeper-headroom KernelBG task). Give that one app a
+  // generous stack. UUID da770002-0000-4000-8000-000000000002 (flutter_counter_get_app_info).
+  static const Uuid s_flutter_counter_uuid = {
+    0xda, 0x77, 0x00, 0x02, 0x00, 0x00, 0x40, 0x00,
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
+  if (uuid_equal(&app_md->uuid, &s_flutter_counter_uuid)) {
+    return APP_STACK_FLUTTER_SIZE;
+  }
   return APP_STACK_NORMAL_SIZE;
 }
 
