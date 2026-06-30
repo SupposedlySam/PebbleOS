@@ -595,12 +595,12 @@ static void prv_ev_release_roots(wasm_exec_env_t env) {
   }
 }
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
-  /* Pass arg as a reference (occupies sizeof(uintptr_t) of arg cells). memcpy,
-     not a type-punned store, to satisfy the firmware's -Werror=strict-aliasing. */
+  /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host
+     pointer size (matches prv_call_invoke_main in dart_runtime.c). argv[1]=0. */
   uint32_t argv[2] = {0};
   uintptr_t a = (uintptr_t)t->arg;
   memcpy(argv, &a, sizeof a);
-  wasm_runtime_call_func_ref(env, t->cb, sizeof(uintptr_t) / sizeof(uint32_t), argv);
+  wasm_runtime_call_func_ref(env, t->cb, 2, argv);
 }
 static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_obj_t arg) {
   if (s_micro_n >= EV_MAX) return;
@@ -655,8 +655,10 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) 
    Counter app's root-layer update_proc reads this: before the first frame it draws a
    loading screen; after, it leaves the framebuffer alone (Flutter owns it). */
 static bool s_frame_presented;
+static int s_frame_count;
 bool dart_embedder_frame_presented(void) { return s_frame_presented; }
-void dart_embedder_reset_frame(void) { s_frame_presented = false; }
+int dart_embedder_frame_count(void) { return s_frame_count; }
+void dart_embedder_reset_frame(void) { s_frame_presented = false; s_frame_count = 0; }
 
 /* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the APP
    framebuffer, downconverting each pixel to the panel's GColor8, then request a
@@ -690,6 +692,7 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
     }
   }
   s_frame_presented = true;
+  s_frame_count++;
   app_request_render();
 }
 static int32_t prv_display_width(wasm_exec_env_t env) {
