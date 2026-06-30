@@ -23,3 +23,12 @@ void dart_embedder_clear_last_print(void);
 //! deferred warm-up frame) and after each injected input event. @param env/inst the running
 //! module's exec env + instance.
 void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst);
+
+//! True once the running Flutter app has painted at least one frame into the app
+//! framebuffer via presentFrame. The Counter app's root layer uses this to draw a
+//! loading screen until the first frame, then leave the framebuffer to Flutter.
+bool dart_embedder_frame_presented(void);
+
+//! Clear the frame-presented flag (call when (re)starting an app so the loading screen
+//! shows again until its first frame).
+void dart_embedder_reset_frame(void);

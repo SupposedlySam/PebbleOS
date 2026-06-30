@@ -11,11 +11,10 @@
 #include "kernel/pbl_malloc.h"
 #include "system/logging.h"
 
-#include "applib/graphics/framebuffer.h"
+#include "applib/app.h"
 #include "applib/graphics/gcolor_definitions.h"
 #include "applib/graphics/gtypes.h"
 #include "pbl/services/compositor/compositor.h"
-#include "pbl/services/compositor/compositor_display.h"
 
 #include "wasm_export.h"
 #include "gc_export.h"
@@ -652,23 +651,27 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) 
 
 /* ---- M3 present-frame + per-watch geometry bridges ---- */
 
-static void prv_present_complete(void) {}
+/* Set once Flutter has painted at least one frame into the app framebuffer. The
+   Counter app's root-layer update_proc reads this: before the first frame it draws a
+   loading screen; after, it leaves the framebuffer alone (Flutter owns it). */
+static bool s_frame_presented;
+bool dart_embedder_frame_presented(void) { return s_frame_presented; }
+void dart_embedder_reset_frame(void) { s_frame_presented = false; }
 
-/* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the system
-   framebuffer, downconverting each pixel to the panel's GColor8, then push it to
-   the display. Clamps to the framebuffer bounds if the source size differs. */
+/* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the APP
+   framebuffer, downconverting each pixel to the panel's GColor8, then request a
+   normal app render. The compositor composites the app framebuffer to the panel every
+   cycle (the same path every app uses), so the frame persists. We deliberately do NOT
+   write the system framebuffer or freeze the compositor: doing that fought the OS from
+   a non-foreground context and the frame never stuck (the watchface owned the screen).
+   Clamps to the framebuffer bounds if the source size differs. */
 static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
                               int32_t w, int32_t h) {
-  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
   uint8_t *fb = (uint8_t *)bmp.addr;
   if (!fb || w <= 0 || h <= 0) {
     return;
   }
-  // Freeze the compositor so the foreground watchface's render cycle can't repaint
-  // over our framebuffer write (without this, compositor_display_update flashes the
-  // frame but the watchface immediately overwrites it -> the user only sees the
-  // watchface). Idempotent; dart_app_stop unfreezes to restore the normal UI.
-  compositor_freeze();
   int32_t fbw = bmp.bounds.size.w, fbh = bmp.bounds.size.h;
   uint16_t rs = bmp.row_size_bytes;
   int32_t rows = h < fbh ? h : fbh;
@@ -686,15 +689,15 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
       fb[y * rs + x] = c.argb;
     }
   }
-  framebuffer_dirty_all(compositor_get_framebuffer());
-  compositor_display_update(prv_present_complete);
+  s_frame_presented = true;
+  app_request_render();
 }
 static int32_t prv_display_width(wasm_exec_env_t env) {
-  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
   return (int32_t)bmp.bounds.size.w;
 }
 static int32_t prv_display_height(wasm_exec_env_t env) {
-  GBitmap bmp = compositor_get_framebuffer_as_bitmap();
+  GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
   return (int32_t)bmp.bounds.size.h;
 }
 
