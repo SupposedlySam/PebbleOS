@@ -16,6 +16,7 @@
 #include "console/dbgserial.h"
 #include "console/prompt.h"
 #include "drivers/task_watchdog.h"
+#include "pbl/services/compositor/compositor.h"
 #include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/system_task.h"
@@ -292,6 +293,11 @@ static wasm_exec_env_t s_app_exec_env;
 static wasm_function_inst_t s_app_inject_tap;
 
 void dart_app_stop(void) {
+  // present-frame froze the compositor to keep the watchface from overwriting the
+  // rendered frame; restore the normal UI now that the app is going away.
+  if (s_app_inst) {
+    compositor_unfreeze();
+  }
   if (s_app_exec_env) { wasm_runtime_destroy_exec_env(s_app_exec_env); s_app_exec_env = NULL; }
   if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
   if (s_app_module) { wasm_runtime_unload(s_app_module); s_app_module = NULL; }

@@ -664,6 +664,11 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
   if (!fb || w <= 0 || h <= 0) {
     return;
   }
+  // Freeze the compositor so the foreground watchface's render cycle can't repaint
+  // over our framebuffer write (without this, compositor_display_update flashes the
+  // frame but the watchface immediately overwrites it -> the user only sees the
+  // watchface). Idempotent; dart_app_stop unfreezes to restore the normal UI.
+  compositor_freeze();
   int32_t fbw = bmp.bounds.size.w, fbh = bmp.bounds.size.h;
   uint16_t rs = bmp.row_size_bytes;
   int32_t rows = h < fbh ? h : fbh;
