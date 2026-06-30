@@ -15,6 +15,7 @@
 
 #include "console/dbgserial.h"
 #include "console/prompt.h"
+#include "drivers/task_watchdog.h"
 #include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/system_task.h"
@@ -312,6 +313,12 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
      rewrites the load buffer in place; dart_app_stop frees it. */
   s_app_buf = wasm_buf;
+  /* The 1.18MB load + instantiate + runApp + first frame run synchronously on the
+     interpreter for many seconds -- far longer than the 500ms task-watchdog window
+     -- so this (KernelBG) task can't check in and the watchdog reboots us mid-init.
+     Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
+     the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
+  task_watchdog_pause(240);
   s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!s_app_module) {
     snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
@@ -335,12 +342,14 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   }
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
   s_app_inject_tap = wasm_runtime_lookup_function(s_app_inst, "injectTap");
   if (!s_app_inject_tap) {
     PBL_LOG_ALWAYS("dart: app has no injectTap export (input disabled)");
   }
   return true;
 fail:
+  task_watchdog_resume(); /* re-arm before bailing (pause was active past the load) */
   dart_app_stop();
   return false;
 }
@@ -353,12 +362,17 @@ bool dart_app_inject_tap(double x, double y) {
   uint32_t argv[4];
   memcpy(&argv[0], &x, sizeof(double));
   memcpy(&argv[2], &y, sizeof(double));
+  /* tap -> setState -> scheduleFrame -> build/layout/paint is also heavy on the
+     interpreter; pause the watchdog around it (see dart_app_start). */
+  task_watchdog_pause(240);
   if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_tap, 4, argv)) {
+    task_watchdog_resume();
     PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
     return false;
   }
   /* tap -> setState -> scheduleFrame queued a frame; drain it -> re-render. */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  task_watchdog_resume();
   return true;
 }
 
