@@ -594,12 +594,28 @@ static void prv_ev_release_roots(wasm_exec_env_t env) {
     s_root_n = 0;
   }
 }
+/* DIAG (throwaway, INV2): last callback the event loop tried to invoke, captured
+   so `dart status` can report the ACTUAL func_idx + param arity over BLE instead
+   of us guessing why WAMR rejects the argc. Remove once the argc puzzle is closed. */
+static char s_ev_diag[120];
+static int s_ev_invokes;
+const char *dart_embedder_ev_diag(void) { return s_ev_diag; }
+
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host
      pointer size (matches prv_call_invoke_main in dart_runtime.c). argv[1]=0. */
   uint32_t argv[2] = {0};
   uintptr_t a = (uintptr_t)t->arg;
   memcpy(argv, &a, sizeof a);
+  /* DIAG: record what we're about to call so a refused argc is observable. */
+  uint32_t fidx = wasm_func_obj_get_func_idx_bound(t->cb);
+  wasm_func_type_t ft = wasm_func_obj_get_func_type(t->cb);
+  uint32_t pcount = ft ? wasm_func_type_get_param_count(ft) : 0xFFFFu;
+  wasm_valkind_t k0 = (ft && pcount > 0) ? wasm_func_type_get_param_valkind(ft, 0) : 0xFF;
+  snprintf(s_ev_diag, sizeof s_ev_diag,
+           "inv#%d fidx=%u pcount=%u k0=0x%x argc=2 micro=%d timer=%d",
+           ++s_ev_invokes, (unsigned)fidx, (unsigned)pcount, (unsigned)k0,
+           s_micro_n, s_timer_n);
   wasm_runtime_call_func_ref(env, t->cb, 2, argv);
 }
 static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_obj_t arg) {

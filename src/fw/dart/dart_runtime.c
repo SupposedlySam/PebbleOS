@@ -13,12 +13,15 @@
 #include "resource/resource.h"
 #include "resource/resource_ids.auto.h"
 
+#include "apps/system/flutter_counter/flutter_counter.h"
 #include "console/dbgserial.h"
 #include "console/prompt.h"
 #include "drivers/task_watchdog.h"
+#include "kernel/event_loop.h"
 #include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
 #include "pbl/services/system_task.h"
+#include "process_management/app_manager.h"
 #include "system/logging.h"
 #include "util/heap.h"
 
@@ -197,7 +200,7 @@ static bool prv_call_invoke_main(wasm_module_t module, wasm_module_inst_t inst,
 }
 
 //! Human-readable reason the last dart_run_module() failed (for the console).
-static char s_module_fail[96];
+static char s_module_fail[224];
 
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
@@ -347,6 +350,22 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
+
+  /* Diagnose why the first frame didn't render (most common: GC OOM in render()
+     throws a WASM exception that exits the event loop before presentFrame). */
+  const char *ev_exc = wasm_runtime_get_exception(s_app_inst);
+  if (ev_exc && ev_exc[0]) {
+    /* DIAG (throwaway, INV2): keep the FULL exception (so "must be no smaller than N"
+       is not truncated) and append the per-invoke diag (actual func_idx/param arity). */
+    snprintf(s_module_fail, sizeof(s_module_fail), "evloop exc: %s | %s",
+             ev_exc, dart_embedder_ev_diag());
+    PBL_LOG_ALWAYS("dart: app event-loop exception: %s", ev_exc);
+  } else if (!dart_embedder_frame_presented()) {
+    strncpy(s_module_fail, "evloop ok, no frame (timer not fired?)",
+            sizeof(s_module_fail) - 1);
+    PBL_LOG_ALWAYS("dart: app event-loop ok but presentFrame never called");
+  }
+
   s_app_inject_tap = wasm_runtime_lookup_function(s_app_inst, "injectTap");
   if (!s_app_inject_tap) {
     PBL_LOG_ALWAYS("dart: app has no injectTap export (input disabled)");
@@ -378,6 +397,14 @@ bool dart_app_inject_tap(double x, double y) {
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
   task_watchdog_resume();
   return true;
+}
+
+bool dart_app_is_running(void) {
+  return s_app_inst != NULL;
+}
+
+const char *dart_app_last_fail(void) {
+  return s_module_fail;
 }
 
 //! Minimal substring check (avoids pulling in <string.h> here).
@@ -481,6 +508,32 @@ void command_dart_tap(void) {
   bool ok = dart_app_inject_tap(100.0, 114.0);
   prompt_send_response_fmt(buf, sizeof(buf), "dart: tap %s",
                            ok ? "OK (re-rendered)" : "FAILED (no app running?)");
+}
+
+//! `dart status`: report resident-app state + last-failure reason over the BLE console.
+//! Safe to call at any time; reads only global flags (no WAMR calls).
+void command_dart_status(void) {
+  char buf[288];
+  prompt_send_response_fmt(buf, sizeof(buf),
+      "dart: running=%s frames=%d fail=%s",
+      dart_app_is_running() ? "yes" : "no",
+      dart_embedder_frame_count(),
+      s_module_fail[0] ? s_module_fail : "(none)");
+}
+
+//! Callback that runs on KernelMain (the launcher task) to start the Counter app.
+static void prv_launch_counter_cb(void *unused) {
+  app_manager_launch_new_app(&(AppLaunchConfig) {
+    .md = flutter_counter_get_app_info(),
+    .restart = true,
+  });
+}
+
+//! `dart counter`: launch the Counter system app via the normal app-manager path
+//! (app task, 32KB stack). Equivalent to selecting it from the menu.
+void command_dart_counter(void) {
+  launcher_task_add_callback(prv_launch_counter_cb, NULL);
+  prompt_send_response("dart: launching Counter app");
 }
 
 //! Execute a tiny no-GC wasm module (add(40,2)) to verify WAMR runs wasm in the
