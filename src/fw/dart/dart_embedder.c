@@ -201,9 +201,41 @@ static wasm_externref_obj_t prv_string_from_ascii_bytes(wasm_exec_env_t env,
   return prv_wrap(env, s);
 }
 
+/* DIAG (throwaway, INV2): capture the last few i64ToString (value, radix) pairs so
+   `dart status` can show what the counter app formats. radix should be 10 (proves the
+   i64+i32 native marshalling is correct); if value is then 0xFFFFFFFF-range while the
+   Dart count should be small, the bug is Dart-side i64 (box/arith), not arg transit. */
+#define I64_DBG_N 8
+static int64_t s_i64_dbg_val[I64_DBG_N];
+static int32_t s_i64_dbg_radix[I64_DBG_N];
+static int s_i64_dbg_head;   /* next write slot (circular) */
+static int s_i64_dbg_count;  /* total calls */
+static char s_i64_dbg[256];
+const char *dart_embedder_i64_dbg(void) {
+  /* Format the last up-to-8 (value hi:lo, radix) pairs, oldest first. */
+  int n = s_i64_dbg_count < I64_DBG_N ? s_i64_dbg_count : I64_DBG_N;
+  int start = (s_i64_dbg_head - n + I64_DBG_N) % I64_DBG_N;
+  int len = snprintf(s_i64_dbg, sizeof s_i64_dbg, "calls=%d last%d:", s_i64_dbg_count, n);
+  for (int k = 0; k < n && len < (int)sizeof(s_i64_dbg) - 30; k++) {
+    int i = (start + k) % I64_DBG_N;
+    len += snprintf(s_i64_dbg + len, sizeof(s_i64_dbg) - len, "[%08x:%08x r%d]",
+                    (unsigned)((uint64_t)s_i64_dbg_val[i] >> 32),
+                    (unsigned)((uint64_t)s_i64_dbg_val[i] & 0xffffffffu),
+                    (int)s_i64_dbg_radix[i]);
+  }
+  return s_i64_dbg;
+}
+static void prv_i64_note(int64_t value, int32_t radix) {
+  s_i64_dbg_val[s_i64_dbg_head] = value;
+  s_i64_dbg_radix[s_i64_dbg_head] = radix;
+  s_i64_dbg_head = (s_i64_dbg_head + 1) % I64_DBG_N;
+  s_i64_dbg_count++;
+}
+
 static wasm_externref_obj_t prv_i64_to_string(wasm_exec_env_t env, int64_t value,
                                               int32_t radix) {
   char buf[72];
+  prv_i64_note(value, radix);
   if (radix == 16) {
     snprintf(buf, sizeof buf, "%" PRIx64, value);
   } else {

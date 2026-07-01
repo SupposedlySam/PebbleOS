@@ -35,6 +35,11 @@ const char *dart_embedder_ev_diag(void);
 //! invoke-time cb to tell marshalling vs corruption vs GC lifetime apart. Remove with the diag.
 const char *dart_embedder_sched_diag(void);
 
+//! DIAG (throwaway): last up-to-8 i64ToString (value hi:lo, radix) pairs -- what the counter
+//! app formats via '$count'. radix should be 10 (proves i64+i32 native marshalling); a
+//! 0xFFFFFFFF-range value then means the Dart int itself is garbage, not arg transit.
+const char *dart_embedder_i64_dbg(void);
+
 //! True once the running Flutter app has painted at least one frame into the app
 //! framebuffer via presentFrame. The Counter app's root layer uses this to draw a
 //! loading screen until the first frame, then leave the framebuffer to Flutter.
