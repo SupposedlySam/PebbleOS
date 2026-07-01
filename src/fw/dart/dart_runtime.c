@@ -553,16 +553,25 @@ void command_dart_tap(void) {
                            ok ? "OK (re-rendered)" : "FAILED (no app running?)");
 }
 
+//! DIAG (throwaway, INV2): word-swap instrumentation readouts from the engine.
+//! csp diag = anomalous branch-copy overlaps (runtime-vs-validator stack
+//! divergence sites); field diag = i64 struct-field memory health.
+extern uint32_t wasm_interp_csp_diag(char *buf, uint32_t buf_len);
+extern void wasm_gc_field_diag(char *buf, uint32_t buf_len);
+
 //! `dart status`: report resident-app state + last-failure reason over the BLE console.
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {
   char buf[1024];
+  char csp[192], fld[96];
+  wasm_interp_csp_diag(csp, sizeof(csp));
+  wasm_gc_field_diag(fld, sizeof(fld));
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s || i64=%s",
+      "dart: running=%s frames=%d fail=%s || i64=%s || %s || %s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
       s_module_fail[0] ? s_module_fail : "(none)",
-      dart_embedder_i64_dbg());
+      dart_embedder_i64_dbg(), csp, fld);
 }
 
 //! Callback that runs on KernelMain (the launcher task) to start the Counter app.
