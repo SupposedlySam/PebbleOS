@@ -321,7 +321,7 @@ static const Command s_prompt_commands[] = {
   { "dart status", command_dart_status, 0 },
   { "dart counter", command_dart_counter, 0 },
   { "screenshot", command_screenshot, 0 },
-  { "screenshot rows", command_screenshot_rows, 2 },
+  { "ssrows", command_screenshot_rows, 2 },
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
   { "psram", command_psram, 1 },
 #endif

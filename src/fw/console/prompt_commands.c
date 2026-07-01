@@ -1668,8 +1668,10 @@ void command_screenshot(void) {
   prv_emit_screenshot_rows(0, DISP_ROWS);
 }
 
-/* `screenshot rows <start> <count>`: emit only that row range -- a small, fast, reliable
-   grab (e.g. the vertically-centered counter digits) instead of the slow full frame. */
+/* `ssrows <start> <count>`: emit only that row range. Distinct command name (NOT
+   "screenshot rows" -- the console matches the "screenshot" prefix first and rejects the
+   args). Keep each grab small (~20-25 rows): a sustained burst of ~290+ AppLog messages
+   wedges the PPoG stream, so the host stitches several sub-range grabs, each under that. */
 void command_screenshot_rows(const char *start_str, const char *count_str) {
   int y0 = atoi(start_str);
   int n = atoi(count_str);
