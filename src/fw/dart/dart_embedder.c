@@ -205,31 +205,41 @@ static wasm_externref_obj_t prv_string_from_ascii_bytes(wasm_exec_env_t env,
    `dart status` can show what the counter app formats. radix should be 10 (proves the
    i64+i32 native marshalling is correct); if value is then 0xFFFFFFFF-range while the
    Dart count should be small, the bug is Dart-side i64 (box/arith), not arg transit. */
-#define I64_DBG_N 8
-static int64_t s_i64_dbg_val[I64_DBG_N];
-static int32_t s_i64_dbg_radix[I64_DBG_N];
-static int s_i64_dbg_head;   /* next write slot (circular) */
-static int s_i64_dbg_count;  /* total calls */
+/* The counter's '$count' scrolls behind Flutter's small layout numbers (200,228,
+   45600...) in a plain ring, so ALSO track the max |value| ever formatted and a ring
+   of only "big" (|v|>1e6) values -- the garbage count (~4.29e9) lands there, layout
+   ints don't. maxabs small (<1e6) => count is fine and the on-screen garbage is a
+   render bug; maxabs huge => count itself is garbage (dart2wasm i64 on 32-bit). */
+#define I64_BIG_N 8
+static int64_t s_i64_big[I64_BIG_N];
+static int s_i64_big_head, s_i64_big_count;
+static uint64_t s_i64_maxabs;
+static int s_i64_calls;
 static char s_i64_dbg[256];
 const char *dart_embedder_i64_dbg(void) {
-  /* Format the last up-to-8 (value hi:lo, radix) pairs, oldest first. */
-  int n = s_i64_dbg_count < I64_DBG_N ? s_i64_dbg_count : I64_DBG_N;
-  int start = (s_i64_dbg_head - n + I64_DBG_N) % I64_DBG_N;
-  int len = snprintf(s_i64_dbg, sizeof s_i64_dbg, "calls=%d last%d:", s_i64_dbg_count, n);
-  for (int k = 0; k < n && len < (int)sizeof(s_i64_dbg) - 30; k++) {
-    int i = (start + k) % I64_DBG_N;
-    len += snprintf(s_i64_dbg + len, sizeof(s_i64_dbg) - len, "[%08x:%08x r%d]",
-                    (unsigned)((uint64_t)s_i64_dbg_val[i] >> 32),
-                    (unsigned)((uint64_t)s_i64_dbg_val[i] & 0xffffffffu),
-                    (int)s_i64_dbg_radix[i]);
+  int n = s_i64_big_count < I64_BIG_N ? s_i64_big_count : I64_BIG_N;
+  int start = (s_i64_big_head - n + I64_BIG_N) % I64_BIG_N;
+  int len = snprintf(s_i64_dbg, sizeof s_i64_dbg, "calls=%d maxabs=%08x:%08x big%d:",
+                     s_i64_calls, (unsigned)(s_i64_maxabs >> 32),
+                     (unsigned)(s_i64_maxabs & 0xffffffffu), n);
+  for (int k = 0; k < n && len < (int)sizeof(s_i64_dbg) - 24; k++) {
+    int i = (start + k) % I64_BIG_N;
+    len += snprintf(s_i64_dbg + len, sizeof(s_i64_dbg) - len, "[%08x:%08x]",
+                    (unsigned)((uint64_t)s_i64_big[i] >> 32),
+                    (unsigned)((uint64_t)s_i64_big[i] & 0xffffffffu));
   }
   return s_i64_dbg;
 }
 static void prv_i64_note(int64_t value, int32_t radix) {
-  s_i64_dbg_val[s_i64_dbg_head] = value;
-  s_i64_dbg_radix[s_i64_dbg_head] = radix;
-  s_i64_dbg_head = (s_i64_dbg_head + 1) % I64_DBG_N;
-  s_i64_dbg_count++;
+  (void)radix;
+  s_i64_calls++;
+  uint64_t a = value < 0 ? (uint64_t)(-value) : (uint64_t)value;
+  if (a > s_i64_maxabs) s_i64_maxabs = a;
+  if (a > 1000000u) {
+    s_i64_big[s_i64_big_head] = value;
+    s_i64_big_head = (s_i64_big_head + 1) % I64_BIG_N;
+    s_i64_big_count++;
+  }
 }
 
 static wasm_externref_obj_t prv_i64_to_string(wasm_exec_env_t env, int64_t value,
