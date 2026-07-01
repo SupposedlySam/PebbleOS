@@ -42,12 +42,21 @@ if bld.env.CONFIG_DART_RUNTIME:
         'platform/pebble/dart_libc_shim.c',
     ]
 
-    # The native-call trampoline must match the float ABI: QEMU builds have no
-    # FPU (soft-float), real boards (obelix Cortex-M33) use hard-float VFP.
-    if bld.env.CONFIG_QEMU:
-        wamr_sources.append(core + '/iwasm/common/arch/invokeNative_thumb.s')
-    else:
-        wamr_sources.append(core + '/iwasm/common/arch/invokeNative_thumb_vfp.s')
+    # The native-call trampoline .s AND the BUILD_TARGET_* define must be a MATCHED
+    # PAIR: the C arg-marshalling (wasm_runtime_invoke_native) lays out argv1 per the
+    # define, and the linked .s reads argv1 per its own layout. Mismatched, native args
+    # after a leading i64 land where the wrong trampoline can't find them -- the generic
+    # BUILD_TARGET_THUMB C variant produces a flat [r0..r3, stack] argv1 (matching
+    # invokeNative_thumb.s), whereas invokeNative_thumb_vfp.s reads [r0..r3, s0..s15(VFP),
+    # stack]. Linking _vfp.s against BUILD_TARGET_THUMB (the old bug) made scheduleOnce's
+    # (i64,funcref,anyref) deliver the funcref as 0xffffffff (the int args spilled into the
+    # VFP/uninitialized region).
+    # BOTH our targets use the SOFT-float calling convention (args -- incl. floats -- in
+    # core registers r0-r3 + stack): QEMU is +nofp, and obelix builds -mfloat-abi=softfp
+    # (see waftools/pebble_arm_gcc.py: FPU for compute, soft ABI for arg passing). So both
+    # use invokeNative_thumb.s + BUILD_TARGET_THUMB. (A true hard-float -mfloat-abi=hard
+    # board would instead pair invokeNative_thumb_vfp.s with BUILD_TARGET_THUMB_VFP.)
+    wamr_sources.append(core + '/iwasm/common/arch/invokeNative_thumb.s')
 
     wamr_defines = [
         'WASM_ENABLE_INTERP=1',
@@ -68,7 +77,7 @@ if bld.env.CONFIG_DART_RUNTIME:
         'WASM_ENABLE_SHRUNK_MEMORY=1',
         'WASM_DISABLE_HW_BOUND_CHECK=1',
         'WASM_DISABLE_STACK_HW_BOUND_CHECK=1',
-        'BUILD_TARGET_THUMB',
+        'BUILD_TARGET_THUMB',  # soft-float ABI (softfp/soft) -- matches invokeNative_thumb.s below
         # WAMR requires these to be its own allocator wrappers.
         'BH_MALLOC=wasm_runtime_malloc',
         'BH_FREE=wasm_runtime_free',
