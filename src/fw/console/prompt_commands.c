@@ -1641,15 +1641,20 @@ void command_perftest_text_all(void) {
    the session mid-stream (~row 51). psleep(120)/row keeps emit under the BLE drain
    rate so the full stream completes. SS:BEGIN always reports full DISP dims; the
    decoder fills only the rows present, so a sub-range is a valid partial image. */
-static void prv_emit_screenshot_rows(int y0, int y1) {
-  FrameBuffer *fb = compositor_get_framebuffer();
+/* Emit rows [y0,y1) of an 8-bit-GColor buffer as SS: hex lines. `base`/`stride`/`cols`
+   describe the buffer; `total_rows` is reported in the SS:BEGIN header (the decoder fills
+   only the rows present). Used for both the system framebuffer (what the panel shows) and
+   the app framebuffer (what a resident app -- e.g. Flutter via `dart flutter` -- painted,
+   even when it is not the foreground surface). See the burst-limit note above. */
+static void prv_emit_buf_rows(const uint8_t *base, int stride, int cols, int total_rows,
+                              int y0, int y1) {
   char line[80];
   static const char s_hex[] = "0123456789abcdef";
-  prompt_send_response_fmt(line, sizeof(line), "SS:BEGIN %d %d", DISP_COLS, DISP_ROWS);
+  prompt_send_response_fmt(line, sizeof(line), "SS:BEGIN %d %d", cols, total_rows);
   for (int y = y0; y < y1; y++) {
-    uint8_t *row = framebuffer_get_line(fb, y);
-    for (int col = 0; col < DISP_COLS; col += 32) {
-      int end = col + 32 < DISP_COLS ? col + 32 : DISP_COLS;
+    const uint8_t *row = base + (size_t)y * stride;
+    for (int col = 0; col < cols; col += 32) {
+      int end = col + 32 < cols ? col + 32 : cols;
       char chunk[65]; /* 32 bytes × 2 hex chars + NUL */
       int ci = 0;
       for (int x = col; x < end; x++) {
@@ -1664,14 +1669,34 @@ static void prv_emit_screenshot_rows(int y0, int y1) {
   prompt_send_response("SS:END");
 }
 
+static void prv_emit_screenshot_rows(int y0, int y1) {
+  FrameBuffer *fb = compositor_get_framebuffer();
+  prv_emit_buf_rows(framebuffer_get_line(fb, 0), DISP_COLS, DISP_COLS, DISP_ROWS, y0, y1);
+}
+
+/* The app framebuffer is one contiguous buffer whose rows may be wider than DISP_COLS
+   (row_size_bytes), so pass the real stride/dims. */
+static void prv_emit_app_rows(int y0, int y1) {
+  GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
+  if (!bmp.addr) {
+    prompt_send_response("SS:BEGIN 0 0");
+    prompt_send_response("SS:END");
+    return;
+  }
+  int rows = bmp.bounds.size.h;
+  if (y1 > rows) y1 = rows;
+  prv_emit_buf_rows((const uint8_t *)bmp.addr, bmp.row_size_bytes, bmp.bounds.size.w,
+                    rows, y0, y1);
+}
+
 void command_screenshot(void) {
   prv_emit_screenshot_rows(0, DISP_ROWS);
 }
 
-/* `ssrows <start> <count>`: emit only that row range. Distinct command name (NOT
-   "screenshot rows" -- the console matches the "screenshot" prefix first and rejects the
-   args). Keep each grab small (~20-25 rows): a sustained burst of ~290+ AppLog messages
-   wedges the PPoG stream, so the host stitches several sub-range grabs, each under that. */
+/* `ssrows <start> <count>`: emit only that row range of the system framebuffer. Distinct
+   command name (NOT "screenshot rows" -- the console matches the "screenshot" prefix first
+   and rejects the args). Keep each grab small (~20-25 rows): a sustained burst of ~290+
+   AppLog messages wedges the PPoG stream, so the host stitches several sub-range grabs. */
 void command_screenshot_rows(const char *start_str, const char *count_str) {
   int y0 = atoi(start_str);
   int n = atoi(count_str);
@@ -1683,6 +1708,22 @@ void command_screenshot_rows(const char *start_str, const char *count_str) {
     return;
   }
   prv_emit_screenshot_rows(y0, y1);
+}
+
+/* `ssapp <start> <count>`: like ssrows, but dumps the APP framebuffer -- what a resident
+   Flutter app painted via `dart flutter`, readable even when the watchface owns the panel.
+   Lets us verify Flutter's output + the counter value without foregrounding the (flaky,
+   small-stack) Counter app. */
+void command_screenshot_app_rows(const char *start_str, const char *count_str) {
+  int y0 = atoi(start_str);
+  int n = atoi(count_str);
+  int y1 = y0 + n;
+  if (y0 < 0) y0 = 0;
+  if (y0 >= y1) {
+    prompt_send_response("bad range");
+    return;
+  }
+  prv_emit_app_rows(y0, y1);
 }
 #endif
 

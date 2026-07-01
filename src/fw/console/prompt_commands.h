@@ -304,6 +304,7 @@ extern void command_dart_status(void);
 extern void command_dart_counter(void);
 extern void command_screenshot(void);
 extern void command_screenshot_rows(const char *start_str, const char *count_str);
+extern void command_screenshot_app_rows(const char *start_str, const char *count_str);
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
 extern void command_psram(const char *div_str);  // sf32lb52x PSRAM bring-up
 #endif
@@ -322,6 +323,7 @@ static const Command s_prompt_commands[] = {
   { "dart counter", command_dart_counter, 0 },
   { "screenshot", command_screenshot, 0 },
   { "ssrows", command_screenshot_rows, 2 },
+  { "ssapp", command_screenshot_app_rows, 2 },
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
   { "psram", command_psram, 1 },
 #endif
