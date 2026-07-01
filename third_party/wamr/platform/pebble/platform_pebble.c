@@ -42,6 +42,20 @@ uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
   return (uintptr_t)(*(void **)(mi->global_data + g->data_offset));
 }
 
+/* Re-bind an exec env's thread handle + native-stack boundary to the CURRENT
+   task. The dart runtime's single exec env is entered from both KernelBG (the
+   console path) and the app task (button clicks); the stack-overflow guard set
+   at creation time describes the creating task's stack, so every cross-task
+   entry must re-bind or the guard compares against the wrong stack. Lives here
+   because wasm_exec_env_set_thread_info is an internal header and this TU is
+   compiled with the engine's defines (see dart_wamr_global_probe above). */
+#include "wasm_exec_env.h"
+void
+dart_wamr_bind_exec_env_to_current_task(void *exec_env)
+{
+    wasm_exec_env_set_thread_info((WASMExecEnv *)exec_env);
+}
+
 /* ---- lifecycle ---- */
 
 int
@@ -135,10 +149,27 @@ os_self_thread(void)
 uint8 *
 os_thread_get_stack_boundary(void)
 {
-    /* Returning NULL disables WAMR's native-stack-overflow guard, which is
-       acceptable for a single trusted module; the interpreter bounds its own
-       value stack. */
-    return NULL;
+    /* Find the CURRENT task's stack base (lowest address) so WAMR's
+       native-stack-overflow guard raises a catchable trap instead of the task
+       hard-faulting: the classic interpreter recurses in C per WASM call and a
+       deep Flutter re-render (tap -> build/layout/paint) can exceed the 32KB
+       app-task stack. FreeRTOS has no per-task accessor in this kernel, so scan
+       uxTaskGetSystemState for our handle (configUSE_TRACE_FACILITY=1 exposes
+       pxStack). Called once per exec-env bind, not per wasm call, so the scan
+       cost is fine. NOTE: the dart exec env is entered from BOTH KernelBG (the
+       console/dev path) and the app task (button clicks) -- the embedder must
+       re-bind the boundary at each cross-task entry (see dart_runtime.c). */
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    static TaskStatus_t statuses[24];
+    UBaseType_t n = uxTaskGetSystemState(statuses,
+                                         sizeof(statuses) / sizeof(statuses[0]),
+                                         NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+        if (statuses[i].xHandle == self) {
+            return (uint8_t *)statuses[i].pxStack;
+        }
+    }
+    return NULL; /* unknown task: guard disabled, previous behavior */
 }
 
 void

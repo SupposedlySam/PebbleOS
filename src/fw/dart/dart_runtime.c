@@ -412,10 +412,18 @@ fail:
   return false;
 }
 
+//! Re-bind the exec env's thread handle + stack-overflow boundary to the current
+//! task (platform_pebble.c). The single dart exec env is entered from KernelBG
+//! (console) AND the app task (button clicks); without the re-bind the guard
+//! compares SP against the CREATING task's stack and deep re-renders hard-fault
+//! instead of trapping.
+extern void dart_wamr_bind_exec_env_to_current_task(void *exec_env);
+
 bool dart_app_inject_tap(double x, double y) {
   if (!s_app_exec_env || !s_app_inject_tap) {
     return false;
   }
+  dart_wamr_bind_exec_env_to_current_task(s_app_exec_env);
   /* injectTap(f64 x, f64 y): two doubles occupy 4 arg cells. */
   uint32_t argv[4];
   memcpy(&argv[0], &x, sizeof(double));
