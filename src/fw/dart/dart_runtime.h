@@ -44,6 +44,12 @@ void dart_app_stop(void);
 //! true on success. Used by the `dart flutter` console command and the Counter app.
 bool dart_app_start_flutter_counter(void);
 
+//! DIAG (throwaway, INV2): register a callback invoked with a short stage name ("load",
+//! "instantiate", "exec_env", "invokeMain", "evloop", "evloop-done") before each phase of
+//! dart_app_start, so the Counter app can APP_LOG real-time markers over BLE to localize
+//! where it crashes on the app task (the reboot clears RAM). NULL clears. Remove once fixed.
+void dart_set_stage_cb(void (*cb)(const char *stage));
+
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);
@@ -60,3 +66,10 @@ int dart_smoketest_run_step(int step, int *result_out);
 //! After dart_smoketest_run_step() returns -1, the WAMR error string for the
 //! failing stage (e.g. "allocate memory failed"). Empty if no error.
 const char *dart_smoketest_last_error(void);
+
+//! True if a resident Flutter app is loaded and running (instance alive).
+bool dart_app_is_running(void);
+
+//! Human-readable diagnostic for the last dart_app_start() call (empty if OK).
+//! Set when the event loop exits with an exception or no frame is presented.
+const char *dart_app_last_fail(void);

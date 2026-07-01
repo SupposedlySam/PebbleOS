@@ -208,6 +208,15 @@ extern uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
                                         uint32_t *out_offset, uint32_t *out_type,
                                         uintptr_t *out_initval, uint32_t *out_count);
 
+/* DIAG (throwaway, INV2): stage callback so the caller can emit real-time markers that
+   reach BLE (the Counter app wires this to APP_LOG on endpoint 2006). Lets us localize
+   WHERE dart_app_start crashes on the app task (dart counter reboots) vs KernelBG (dart
+   flutter works) -- the reboot clears RAM, so only real-time emission survives. NULL on
+   the console/KernelBG path (no effect). Remove once the dart counter crash is closed. */
+static void (*s_stage_cb)(const char *stage) = NULL;
+void dart_set_stage_cb(void (*cb)(const char *stage)) { s_stage_cb = cb; }
+#define DART_STAGE(s) do { if (s_stage_cb) s_stage_cb(s); } while (0)
+
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
   uint8_t *module_buf = NULL;
@@ -332,17 +341,20 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
      Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
      the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
   task_watchdog_pause(240);
+  DART_STAGE("load");
   s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!s_app_module) {
     snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
     goto fail;
   }
+  DART_STAGE("instantiate");
   s_app_inst = wasm_runtime_instantiate(s_app_module, DART_FLUTTER_STACK_SIZE,
                                         DART_FLUTTER_HEAP_SIZE, error_buf, sizeof(error_buf));
   if (!s_app_inst) {
     snprintf(s_module_fail, sizeof(s_module_fail), "instantiate: %.70s", error_buf);
     goto fail;
   }
+  DART_STAGE("exec_env");
   s_app_exec_env = wasm_runtime_create_exec_env(s_app_inst, DART_FLUTTER_EXEC_STACK_SIZE);
   if (!s_app_exec_env) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
@@ -362,13 +374,16 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
              (unsigned)off38, (unsigned)ty38, (unsigned)iv38, (unsigned)slot638,
              (unsigned)gcount);
   }
+  DART_STAGE("invokeMain");
   if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
     snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
              wasm_runtime_get_exception(s_app_inst));
     goto fail;
   }
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
+  DART_STAGE("evloop");
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  DART_STAGE("evloop-done");
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
 
   /* Diagnose why the first frame didn't render (most common: GC OOM in render()
