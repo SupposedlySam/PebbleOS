@@ -513,12 +513,13 @@ void command_dart_tap(void) {
 //! `dart status`: report resident-app state + last-failure reason over the BLE console.
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {
-  char buf[288];
+  char buf[512];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s",
+      "dart: running=%s frames=%d fail=%s || sched=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
-      s_module_fail[0] ? s_module_fail : "(none)");
+      s_module_fail[0] ? s_module_fail : "(none)",
+      dart_embedder_sched_diag());
 }
 
 //! Callback that runs on KernelMain (the launcher task) to start the Counter app.

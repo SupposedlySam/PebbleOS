@@ -30,6 +30,11 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst);
 //! observable over BLE. Empty until the first invoke. Remove with the diag in .c.
 const char *dart_embedder_ev_diag(void);
 
+//! DIAG (throwaway): record of each event-loop schedule's RECEIVED callback pointer
+//! and storage slot ("M:cb=..@.. T:cb=..@.. "). Compared against dart_embedder_ev_diag's
+//! invoke-time cb to tell marshalling vs corruption vs GC lifetime apart. Remove with the diag.
+const char *dart_embedder_sched_diag(void);
+
 //! True once the running Flutter app has painted at least one frame into the app
 //! framebuffer via presentFrame. The Counter app's root layer uses this to draw a
 //! loading screen until the first frame, then leave the framebuffer to Flutter.

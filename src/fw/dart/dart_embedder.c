@@ -601,6 +601,22 @@ static char s_ev_diag[120];
 static int s_ev_invokes;
 const char *dart_embedder_ev_diag(void) { return s_ev_diag; }
 
+/* DIAG (throwaway, INV2): independent record of each schedule's RECEIVED callback
+   pointer + the slot it was stored in -- captured at schedule time, NOT read back
+   from the array. Comparing this to prv_ev_invoke's cb=%p distinguishes bad native
+   arg marshalling (garbage here) from post-store memory corruption (valid here,
+   garbage at invoke) from GC lifetime (pointer identical but target freed). */
+static char s_sched_diag[180];
+static int s_sched_len;
+const char *dart_embedder_sched_diag(void) { return s_sched_diag; }
+static void prv_sched_note(char kind, void *cb, void *slot) {
+  if (s_sched_len < (int)sizeof(s_sched_diag) - 44) {
+    s_sched_len += snprintf(s_sched_diag + s_sched_len,
+                            sizeof(s_sched_diag) - s_sched_len,
+                            "%c:cb=%p@%p ", kind, cb, slot);
+  }
+}
+
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host
      pointer size (matches prv_call_invoke_main in dart_runtime.c). argv[1]=0. */
@@ -626,6 +642,7 @@ static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_o
   t->cb = (wasm_func_obj_t)callback;
   t->arg = arg;
   t->due = 0;
+  prv_sched_note('M', (void *)callback, (void *)t);
   prv_ev_pin(env, t);
 }
 static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay,
@@ -635,6 +652,7 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
     t->due = delay < 0 ? 0 : delay;
+    prv_sched_note('T', (void *)callback, (void *)t);
     prv_ev_pin(env, t);
   }
   return wasm_externref_obj_new(env, &s_timer_marker);
