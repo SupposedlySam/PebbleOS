@@ -606,14 +606,18 @@ const char *dart_embedder_ev_diag(void) { return s_ev_diag; }
    from the array. Comparing this to prv_ev_invoke's cb=%p distinguishes bad native
    arg marshalling (garbage here) from post-store memory corruption (valid here,
    garbage at invoke) from GC lifetime (pointer identical but target freed). */
-static char s_sched_diag[180];
+static char s_sched_diag[200];
 static int s_sched_len;
 const char *dart_embedder_sched_diag(void) { return s_sched_diag; }
-static void prv_sched_note(char kind, void *cb, void *slot) {
-  if (s_sched_len < (int)sizeof(s_sched_diag) - 44) {
+/* GC=1 helper in platform_pebble.c (firmware TUs can't index globals[] safely). */
+extern uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
+                                        uint32_t *out_offset, uint32_t *out_type,
+                                        uintptr_t *out_initval, uint32_t *out_count);
+static void prv_sched_note(char kind, void *cb, uintptr_t g638) {
+  if (s_sched_len < (int)sizeof(s_sched_diag) - 60) {
     s_sched_len += snprintf(s_sched_diag + s_sched_len,
                             sizeof(s_sched_diag) - s_sched_len,
-                            "%c:cb=%p@%p ", kind, cb, slot);
+                            "%c:cb=%p g638=0x%x ", kind, cb, (unsigned)g638);
   }
 }
 
@@ -642,7 +646,8 @@ static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_o
   t->cb = (wasm_func_obj_t)callback;
   t->arg = arg;
   t->due = 0;
-  prv_sched_note('M', (void *)callback, (void *)t);
+  prv_sched_note('M', (void *)callback,
+                 dart_wamr_global_probe(wasm_runtime_get_module_inst(env), 638, 0, 0, 0, 0));
   prv_ev_pin(env, t);
 }
 static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay,
@@ -652,7 +657,8 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
     t->due = delay < 0 ? 0 : delay;
-    prv_sched_note('T', (void *)callback, (void *)t);
+    prv_sched_note('T', (void *)callback,
+                   dart_wamr_global_probe(wasm_runtime_get_module_inst(env), 638, 0, 0, 0, 0));
     prv_ev_pin(env, t);
   }
   return wasm_externref_obj_new(env, &s_timer_marker);

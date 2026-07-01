@@ -17,6 +17,31 @@
 #include "kernel/pbl_malloc.h"
 #include "console/dbgserial.h"
 
+#include "wasm_runtime.h"
+
+/* ---- DIAG (throwaway, INV2): read a WASM global's raw slot value + metadata by
+   index. Lives in THIS translation unit because it's compiled with the WAMR defines
+   (WASM_ENABLE_GC=1), so the WASMGlobalInstance stride (it has a GC-only ref_type
+   field) and module-instance layout match the engine's. Firmware TUs compile the
+   headers with GC defaulting to 0, so they must NOT index globals[] themselves.
+   Returns the stored slot value; out-params report offset/type/initial-value/count.
+   Remove once the global-638-reads-0xffffffff bug is closed. ---- */
+uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
+                                 uint32_t *out_offset, uint32_t *out_type,
+                                 uintptr_t *out_initval, uint32_t *out_count) {
+  WASMModuleInstance *mi = (WASMModuleInstance *)module_inst;
+  if (out_count) *out_count = mi->e->global_count;
+  if (idx >= mi->e->global_count) {
+    if (out_offset) *out_offset = 0xffffffffu;
+    return 0;
+  }
+  WASMGlobalInstance *g = &mi->e->globals[idx];
+  if (out_offset) *out_offset = g->data_offset;
+  if (out_type) *out_type = (uint32_t)g->type;
+  if (out_initval) *out_initval = (uintptr_t)g->initial_value.gc_obj;
+  return (uintptr_t)(*(void **)(mi->global_data + g->data_offset));
+}
+
 /* ---- lifecycle ---- */
 
 int

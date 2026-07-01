@@ -201,6 +201,12 @@ static bool prv_call_invoke_main(wasm_module_t module, wasm_module_inst_t inst,
 
 //! Human-readable reason the last dart_run_module() failed (for the console).
 static char s_module_fail[224];
+/* DIAG (throwaway, INV2): funcref-globals snapshot taken at instantiate end. */
+static char s_glob_diag[240];
+/* GC=1 helper (platform_pebble.c) -- reads a WASM global's slot + metadata. */
+extern uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
+                                        uint32_t *out_offset, uint32_t *out_type,
+                                        uintptr_t *out_initval, uint32_t *out_count);
 
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
@@ -341,6 +347,20 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   if (!s_app_exec_env) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
+  }
+  /* DIAG (throwaway, INV2): snapshot the two funcref globals at INSTANTIATE end (before
+     any wasm runs) so `dart status` shows whether global 638 is already 0xffffffff at init
+     (offset/type/init-value bug) or valid here and corrupted later during invokeMain. */
+  {
+    uint32_t off6, ty6, off38, ty38, gcount = 0;
+    uintptr_t iv6, iv38;
+    uintptr_t slot604 = dart_wamr_global_probe(s_app_inst, 604, &off6, &ty6, &iv6, &gcount);
+    uintptr_t slot638 = dart_wamr_global_probe(s_app_inst, 638, &off38, &ty38, &iv38, &gcount);
+    snprintf(s_glob_diag, sizeof(s_glob_diag),
+             "g604{off=%u ty=0x%x init=0x%x slot=0x%x} g638{off=%u ty=0x%x init=0x%x slot=0x%x} n=%u",
+             (unsigned)off6, (unsigned)ty6, (unsigned)iv6, (unsigned)slot604,
+             (unsigned)off38, (unsigned)ty38, (unsigned)iv38, (unsigned)slot638,
+             (unsigned)gcount);
   }
   if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
     snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
@@ -513,13 +533,14 @@ void command_dart_tap(void) {
 //! `dart status`: report resident-app state + last-failure reason over the BLE console.
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {
-  char buf[512];
+  char buf[768];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s || sched=%s",
+      "dart: running=%s frames=%d fail=%s || sched=%s || init=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
       s_module_fail[0] ? s_module_fail : "(none)",
-      dart_embedder_sched_diag());
+      dart_embedder_sched_diag(),
+      s_glob_diag[0] ? s_glob_diag : "(none)");
 }
 
 //! Callback that runs on KernelMain (the launcher task) to start the Counter app.
