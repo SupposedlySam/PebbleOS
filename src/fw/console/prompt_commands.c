@@ -1630,6 +1630,60 @@ void command_perftest_text_all(void) {
 }
 #endif
 
+#ifdef CONFIG_DART_RUNTIME
+/* Hex-dump the system framebuffer over the BLE console so a Mac-side script can
+   decode it to PNG. Lines are short (SS:RRR:CC HHHH..., 32 bytes → 74 chars)
+   to stay within the 80-char AppLog limit. The Python side collects all lines
+   bracketed by SS:BEGIN / SS:END and assembles the image.
+   Layout: 168 rows × 144 cols, 8-bit GColor8 (AARRGGBB 2-bit per channel). */
+/* Emit framebuffer rows [y0, y1) as SS: lines. THROTTLED: without a pace between
+   rows the ~1600 prompt_send_response messages overrun the BLE/PPoG buffer and wedge
+   the session mid-stream (~row 51). psleep(120)/row keeps emit under the BLE drain
+   rate so the full stream completes. SS:BEGIN always reports full DISP dims; the
+   decoder fills only the rows present, so a sub-range is a valid partial image. */
+static void prv_emit_screenshot_rows(int y0, int y1) {
+  FrameBuffer *fb = compositor_get_framebuffer();
+  char line[80];
+  static const char s_hex[] = "0123456789abcdef";
+  prompt_send_response_fmt(line, sizeof(line), "SS:BEGIN %d %d", DISP_COLS, DISP_ROWS);
+  for (int y = y0; y < y1; y++) {
+    uint8_t *row = framebuffer_get_line(fb, y);
+    for (int col = 0; col < DISP_COLS; col += 32) {
+      int end = col + 32 < DISP_COLS ? col + 32 : DISP_COLS;
+      char chunk[65]; /* 32 bytes × 2 hex chars + NUL */
+      int ci = 0;
+      for (int x = col; x < end; x++) {
+        chunk[ci++] = s_hex[row[x] >> 4];
+        chunk[ci++] = s_hex[row[x] & 0xf];
+      }
+      chunk[ci] = '\0';
+      prompt_send_response_fmt(line, sizeof(line), "SS:%d:%d %s", y, col, chunk);
+    }
+    psleep(120); /* pace to the BLE drain rate (see note above) */
+  }
+  prompt_send_response("SS:END");
+}
+
+void command_screenshot(void) {
+  prv_emit_screenshot_rows(0, DISP_ROWS);
+}
+
+/* `screenshot rows <start> <count>`: emit only that row range -- a small, fast, reliable
+   grab (e.g. the vertically-centered counter digits) instead of the slow full frame. */
+void command_screenshot_rows(const char *start_str, const char *count_str) {
+  int y0 = atoi(start_str);
+  int n = atoi(count_str);
+  int y1 = y0 + n;
+  if (y0 < 0) y0 = 0;
+  if (y1 > DISP_ROWS) y1 = DISP_ROWS;
+  if (y0 >= y1) {
+    prompt_send_response("bad range");
+    return;
+  }
+  prv_emit_screenshot_rows(y0, y1);
+}
+#endif
+
 static TimerID s_console_disable_rx_timer = TIMER_INVALID_ID;
 
 static void prv_console_disable_rx_timer_cb(void *data) {
