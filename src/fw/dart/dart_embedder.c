@@ -744,6 +744,18 @@ bool dart_embedder_frame_presented(void) { return s_frame_presented; }
 int dart_embedder_frame_count(void) { return s_frame_count; }
 void dart_embedder_reset_frame(void) { s_frame_presented = false; s_frame_count = 0; }
 
+/* Snapshot of the last presented frame (GColor8, stride == s_snap_w). Allocated from
+   the WAMR pool (PSRAM) on first present, kept for the runtime's lifetime: presentFrame
+   writes the FOREGROUND app's framebuffer, which that app repaints over, so this copy
+   is the only stable record of what Flutter drew (read by the `ssapp` console command). */
+static uint8_t *s_frame_snap;
+static int32_t s_snap_w, s_snap_h;
+const uint8_t *dart_embedder_frame_snapshot(int32_t *w_out, int32_t *h_out) {
+  *w_out = s_snap_w;
+  *h_out = s_snap_h;
+  return s_frame_snap;
+}
+
 /* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the APP
    framebuffer, downconverting each pixel to the panel's GColor8, then request a
    normal app render. The compositor composites the app framebuffer to the panel every
@@ -766,6 +778,14 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
     PBL_LOG_ALWAYS("dart present: source %" PRId32 "x%" PRId32 " vs fb %" PRId32
                    "x%" PRId32 " (clamped)", w, h, fbw, fbh);
   }
+  if (!s_frame_snap) {
+    s_frame_snap = (uint8_t *)wasm_runtime_malloc((uint32_t)(fbw * fbh));
+    if (s_frame_snap) {
+      memset(s_frame_snap, 0, (size_t)(fbw * fbh));
+      s_snap_w = fbw;
+      s_snap_h = fbh;
+    }
+  }
   for (int32_t y = 0; y < rows; y++) {
     for (int32_t x = 0; x < cols; x++) {
       wasm_value_t v;
@@ -773,6 +793,9 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
       uint32_t px = (uint32_t)v.i32;
       GColor8 c = GColorFromRGB((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
       fb[y * rs + x] = c.argb;
+      if (s_frame_snap) {
+        s_frame_snap[y * s_snap_w + x] = c.argb;
+      }
     }
   }
   s_frame_presented = true;

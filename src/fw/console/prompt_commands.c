@@ -1631,6 +1631,8 @@ void command_perftest_text_all(void) {
 #endif
 
 #ifdef CONFIG_DART_RUNTIME
+#include "dart/dart_embedder.h"
+
 /* Hex-dump the system framebuffer over the BLE console so a Mac-side script can
    decode it to PNG. Lines are short (SS:RRR:CC HHHH..., 32 bytes → 74 chars)
    to stay within the 80-char AppLog limit. The Python side collects all lines
@@ -1674,19 +1676,20 @@ static void prv_emit_screenshot_rows(int y0, int y1) {
   prv_emit_buf_rows(framebuffer_get_line(fb, 0), DISP_COLS, DISP_COLS, DISP_ROWS, y0, y1);
 }
 
-/* The app framebuffer is one contiguous buffer whose rows may be wider than DISP_COLS
-   (row_size_bytes), so pass the real stride/dims. */
+/* Emits the Dart embedder's SNAPSHOT of the last frame Flutter presented -- NOT the live
+   app framebuffer: that buffer belongs to the foreground app (app_state_get_framebuffer is
+   task-local), which repaints over Flutter's console-path blit, so reading it live races
+   the watchface and loses. The snapshot persists until the next presentFrame. */
 static void prv_emit_app_rows(int y0, int y1) {
-  GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
-  if (!bmp.addr) {
+  int32_t w = 0, h = 0;
+  const uint8_t *snap = dart_embedder_frame_snapshot(&w, &h);
+  if (!snap || w <= 0 || h <= 0) {
     prompt_send_response("SS:BEGIN 0 0");
     prompt_send_response("SS:END");
     return;
   }
-  int rows = bmp.bounds.size.h;
-  if (y1 > rows) y1 = rows;
-  prv_emit_buf_rows((const uint8_t *)bmp.addr, bmp.row_size_bytes, bmp.bounds.size.w,
-                    rows, y0, y1);
+  if (y1 > h) y1 = h;
+  prv_emit_buf_rows(snap, w, w, h, y0, y1);
 }
 
 void command_screenshot(void) {

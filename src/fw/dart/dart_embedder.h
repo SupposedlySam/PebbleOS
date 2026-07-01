@@ -51,3 +51,11 @@ int dart_embedder_frame_count(void);
 //! Clear the frame-presented flag (call when (re)starting an app so the loading screen
 //! shows again until its first frame).
 void dart_embedder_reset_frame(void);
+
+//! The last frame Flutter presented, as a GColor8 pixel buffer (stride == width), or
+//! NULL before the first present. Persists across compositor repaints: presentFrame
+//! blits into the FOREGROUND app's framebuffer (task-local, app_state_get_framebuffer),
+//! so from the console path the watchface overwrites Flutter's pixels on its next
+//! repaint -- this snapshot is the only stable record of what Flutter drew. Read by
+//! the `ssapp` console command. @param[out] w_out/h_out snapshot dimensions.
+const uint8_t *dart_embedder_frame_snapshot(int32_t *w_out, int32_t *h_out);
