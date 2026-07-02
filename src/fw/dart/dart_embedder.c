@@ -201,96 +201,14 @@ static wasm_externref_obj_t prv_string_from_ascii_bytes(wasm_exec_env_t env,
   return prv_wrap(env, s);
 }
 
-/* DIAG (throwaway, INV2): capture the last few i64ToString (value, radix) pairs so
-   `dart status` can show what the counter app formats. radix should be 10 (proves the
-   i64+i32 native marshalling is correct); if value is then 0xFFFFFFFF-range while the
-   Dart count should be small, the bug is Dart-side i64 (box/arith), not arg transit. */
-/* The counter's '$count' scrolls behind Flutter's small layout numbers (200,228,
-   45600...) in a plain ring, so ALSO track the max |value| ever formatted and a ring
-   of only "big" (|v|>1e6) values -- the garbage count (~4.29e9) lands there, layout
-   ints don't. maxabs small (<1e6) => count is fine and the on-screen garbage is a
-   render bug; maxabs huge => count itself is garbage (dart2wasm i64 on 32-bit). */
-#define I64_BIG_N 8
-static int64_t s_i64_big[I64_BIG_N];
-static int s_i64_big_head, s_i64_big_count;
-static uint64_t s_i64_maxabs;
-static int s_i64_calls;
-static char s_i64_dbg[256];
-const char *dart_embedder_i64_dbg(void) {
-  int n = s_i64_big_count < I64_BIG_N ? s_i64_big_count : I64_BIG_N;
-  int start = (s_i64_big_head - n + I64_BIG_N) % I64_BIG_N;
-  int len = snprintf(s_i64_dbg, sizeof s_i64_dbg, "calls=%d maxabs=%08x:%08x big%d:",
-                     s_i64_calls, (unsigned)(s_i64_maxabs >> 32),
-                     (unsigned)(s_i64_maxabs & 0xffffffffu), n);
-  for (int k = 0; k < n && len < (int)sizeof(s_i64_dbg) - 24; k++) {
-    int i = (start + k) % I64_BIG_N;
-    len += snprintf(s_i64_dbg + len, sizeof(s_i64_dbg) - len, "[%08x:%08x]",
-                    (unsigned)((uint64_t)s_i64_big[i] >> 32),
-                    (unsigned)((uint64_t)s_i64_big[i] & 0xffffffffu));
-  }
-  return s_i64_dbg;
-}
-static void prv_i64_note(int64_t value, int32_t radix) {
-  (void)radix;
-  s_i64_calls++;
-  uint64_t a = value < 0 ? (uint64_t)(-value) : (uint64_t)value;
-  if (a > s_i64_maxabs) s_i64_maxabs = a;
-  if (a > 1000000u) {
-    s_i64_big[s_i64_big_head] = value;
-    s_i64_big_head = (s_i64_big_head + 1) % I64_BIG_N;
-    s_i64_big_count++;
-  }
-}
-
-/* DIAG (throwaway, INV2): per-call trace of the LAST few i64ToString calls --
-   (call#, value hi:lo, RADIX, first chars of the RETURNED string). The v158
-   contradiction: the screen shows count*2^32 but big0 stayed empty, i.e. this
-   native claims it never formatted the big number. This ring settles it:
-   - radix != 10/16  -> the native-call arg marshalling is corrupt (radix is the
-     canary: WASM always passes 10 here);
-   - value small + buf small while the SCREEN shows big -> the rendered string
-     does NOT come from this native -> trace the interpolate/Paragraph path;
-   - value big -> big0/maxabs accounting was wrong and the value IS corrupt. */
-#define I64_TRACE_N 4
-static struct {
-  int call;
-  int64_t value;
-  int32_t radix;
-  char out[14];
-} s_i64_trace[I64_TRACE_N];
-static int s_i64_trace_head;
-static char s_i64_trace_dbg[224];
-const char *dart_embedder_i64_trace(void) {
-  int len = 0;
-  s_i64_trace_dbg[0] = '\0';
-  for (int k = 0; k < I64_TRACE_N && len < (int)sizeof(s_i64_trace_dbg) - 48; k++) {
-    int i = (s_i64_trace_head - 1 - k + 2 * I64_TRACE_N) % I64_TRACE_N;
-    if (!s_i64_trace[i].call) continue;
-    len += snprintf(s_i64_trace_dbg + len, sizeof(s_i64_trace_dbg) - len,
-                    "[#%d %08x:%08x r%d \"%s\"]", s_i64_trace[i].call,
-                    (unsigned)((uint64_t)s_i64_trace[i].value >> 32),
-                    (unsigned)((uint64_t)s_i64_trace[i].value & 0xffffffffu),
-                    (int)s_i64_trace[i].radix, s_i64_trace[i].out);
-  }
-  return s_i64_trace_dbg;
-}
-
 static wasm_externref_obj_t prv_i64_to_string(wasm_exec_env_t env, int64_t value,
                                               int32_t radix) {
   char buf[72];
-  prv_i64_note(value, radix);
   if (radix == 16) {
     snprintf(buf, sizeof buf, "%" PRIx64, value);
   } else {
     snprintf(buf, sizeof buf, "%" PRId64, value);
   }
-  s_i64_trace[s_i64_trace_head].call = s_i64_calls;
-  s_i64_trace[s_i64_trace_head].value = value;
-  s_i64_trace[s_i64_trace_head].radix = radix;
-  strncpy(s_i64_trace[s_i64_trace_head].out, buf,
-          sizeof(s_i64_trace[s_i64_trace_head].out) - 1);
-  s_i64_trace[s_i64_trace_head].out[sizeof(s_i64_trace[s_i64_trace_head].out) - 1] = '\0';
-  s_i64_trace_head = (s_i64_trace_head + 1) % I64_TRACE_N;
   return prv_wrap(env, prv_hstr_from_utf8(buf, (uint32_t)strlen(buf)));
 }
 
@@ -676,50 +594,12 @@ static void prv_ev_release_roots(wasm_exec_env_t env) {
     s_root_n = 0;
   }
 }
-/* DIAG (throwaway, INV2): last callback the event loop tried to invoke, captured
-   so `dart status` can report the ACTUAL func_idx + param arity over BLE instead
-   of us guessing why WAMR rejects the argc. Remove once the argc puzzle is closed. */
-static char s_ev_diag[120];
-static int s_ev_invokes;
-const char *dart_embedder_ev_diag(void) { return s_ev_diag; }
-
-/* DIAG (throwaway, INV2): independent record of each schedule's RECEIVED callback
-   pointer + the slot it was stored in -- captured at schedule time, NOT read back
-   from the array. Comparing this to prv_ev_invoke's cb=%p distinguishes bad native
-   arg marshalling (garbage here) from post-store memory corruption (valid here,
-   garbage at invoke) from GC lifetime (pointer identical but target freed). */
-static char s_sched_diag[200];
-static int s_sched_len;
-const char *dart_embedder_sched_diag(void) { return s_sched_diag; }
-/* GC=1 helper in platform_pebble.c (firmware TUs can't index globals[] safely). */
-extern uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
-                                        uint32_t *out_offset, uint32_t *out_type,
-                                        uintptr_t *out_initval, uint32_t *out_count);
-static void prv_sched_note(char kind, void *cb, uintptr_t g638) {
-  if (s_sched_len < (int)sizeof(s_sched_diag) - 60) {
-    s_sched_len += snprintf(s_sched_diag + s_sched_len,
-                            sizeof(s_sched_diag) - s_sched_len,
-                            "%c:cb=%p g638=0x%x ", kind, cb, (unsigned)g638);
-  }
-}
-
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host
      pointer size (matches prv_call_invoke_main in dart_runtime.c). argv[1]=0. */
   uint32_t argv[2] = {0};
   uintptr_t a = (uintptr_t)t->arg;
   memcpy(argv, &a, sizeof a);
-  /* DIAG: record the callback's bound func_idx (a plain field read -- the same
-     call wasm_runtime_call_func_ref makes internally, so it's safe here) plus the
-     raw obj pointer. We deliberately AVOID wasm_func_obj_get_func_type/
-     get_param_valkind: get_param_valkind does bh_assert(0) on a GC ref param type,
-     which aborts -> reboots before we can report. func_idx + the full exception
-     ("must be no smaller than N") is enough: cross-ref func_idx in the .wasm to get
-     its param arity, N is the runtime's required cell count. */
-  uint32_t fidx = wasm_func_obj_get_func_idx_bound(t->cb);
-  snprintf(s_ev_diag, sizeof s_ev_diag,
-           "inv#%d fidx=%u cb=%p argc=2 micro=%d timer=%d",
-           ++s_ev_invokes, (unsigned)fidx, (void *)t->cb, s_micro_n, s_timer_n);
   wasm_runtime_call_func_ref(env, t->cb, 2, argv);
 }
 static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_obj_t arg) {
@@ -728,8 +608,6 @@ static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_o
   t->cb = (wasm_func_obj_t)callback;
   t->arg = arg;
   t->due = 0;
-  prv_sched_note('M', (void *)callback,
-                 dart_wamr_global_probe(wasm_runtime_get_module_inst(env), 638, 0, 0, 0, 0));
   prv_ev_pin(env, t);
 }
 static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay,
@@ -739,8 +617,6 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
     t->due = delay < 0 ? 0 : delay;
-    prv_sched_note('T', (void *)callback,
-                   dart_wamr_global_probe(wasm_runtime_get_module_inst(env), 638, 0, 0, 0, 0));
     prv_ev_pin(env, t);
   }
   return wasm_externref_obj_new(env, &s_timer_marker);

@@ -201,21 +201,6 @@ static bool prv_call_invoke_main(wasm_module_t module, wasm_module_inst_t inst,
 
 //! Human-readable reason the last dart_run_module() failed (for the console).
 static char s_module_fail[224];
-/* DIAG (throwaway, INV2): funcref-globals snapshot taken at instantiate end. */
-static char s_glob_diag[240];
-/* GC=1 helper (platform_pebble.c) -- reads a WASM global's slot + metadata. */
-extern uintptr_t dart_wamr_global_probe(void *module_inst, uint32_t idx,
-                                        uint32_t *out_offset, uint32_t *out_type,
-                                        uintptr_t *out_initval, uint32_t *out_count);
-
-/* DIAG (throwaway, INV2): stage callback so the caller can emit real-time markers that
-   reach BLE (the Counter app wires this to APP_LOG on endpoint 2006). Lets us localize
-   WHERE dart_app_start crashes on the app task (dart counter reboots) vs KernelBG (dart
-   flutter works) -- the reboot clears RAM, so only real-time emission survives. NULL on
-   the console/KernelBG path (no effect). Remove once the dart counter crash is closed. */
-static void (*s_stage_cb)(const char *stage) = NULL;
-void dart_set_stage_cb(void (*cb)(const char *stage)) { s_stage_cb = cb; }
-#define DART_STAGE(s) do { if (s_stage_cb) s_stage_cb(s); } while (0)
 
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
@@ -341,59 +326,36 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
      Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
      the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
   task_watchdog_pause(240);
-  DART_STAGE("load");
   s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
   if (!s_app_module) {
     snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
     goto fail;
   }
-  DART_STAGE("instantiate");
   s_app_inst = wasm_runtime_instantiate(s_app_module, DART_FLUTTER_STACK_SIZE,
                                         DART_FLUTTER_HEAP_SIZE, error_buf, sizeof(error_buf));
   if (!s_app_inst) {
     snprintf(s_module_fail, sizeof(s_module_fail), "instantiate: %.70s", error_buf);
     goto fail;
   }
-  DART_STAGE("exec_env");
   s_app_exec_env = wasm_runtime_create_exec_env(s_app_inst, DART_FLUTTER_EXEC_STACK_SIZE);
   if (!s_app_exec_env) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
   }
-  /* DIAG (throwaway, INV2): snapshot the two funcref globals at INSTANTIATE end (before
-     any wasm runs) so `dart status` shows whether global 638 is already 0xffffffff at init
-     (offset/type/init-value bug) or valid here and corrupted later during invokeMain. */
-  {
-    uint32_t off6, ty6, off38, ty38, gcount = 0;
-    uintptr_t iv6, iv38;
-    uintptr_t slot604 = dart_wamr_global_probe(s_app_inst, 604, &off6, &ty6, &iv6, &gcount);
-    uintptr_t slot638 = dart_wamr_global_probe(s_app_inst, 638, &off38, &ty38, &iv38, &gcount);
-    snprintf(s_glob_diag, sizeof(s_glob_diag),
-             "g604{off=%u ty=0x%x init=0x%x slot=0x%x} g638{off=%u ty=0x%x init=0x%x slot=0x%x} n=%u",
-             (unsigned)off6, (unsigned)ty6, (unsigned)iv6, (unsigned)slot604,
-             (unsigned)off38, (unsigned)ty38, (unsigned)iv38, (unsigned)slot638,
-             (unsigned)gcount);
-  }
-  DART_STAGE("invokeMain");
   if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
     snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
              wasm_runtime_get_exception(s_app_inst));
     goto fail;
   }
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
-  DART_STAGE("evloop");
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
-  DART_STAGE("evloop-done");
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
 
   /* Diagnose why the first frame didn't render (most common: GC OOM in render()
      throws a WASM exception that exits the event loop before presentFrame). */
   const char *ev_exc = wasm_runtime_get_exception(s_app_inst);
   if (ev_exc && ev_exc[0]) {
-    /* DIAG (throwaway, INV2): keep the FULL exception (so "must be no smaller than N"
-       is not truncated) and append the per-invoke diag (actual func_idx/param arity). */
-    snprintf(s_module_fail, sizeof(s_module_fail), "evloop exc: %s | %s",
-             ev_exc, dart_embedder_ev_diag());
+    snprintf(s_module_fail, sizeof(s_module_fail), "evloop exc: %.150s", ev_exc);
     PBL_LOG_ALWAYS("dart: app event-loop exception: %s", ev_exc);
   } else if (!dart_embedder_frame_presented()) {
     strncpy(s_module_fail, "evloop ok, no frame (timer not fired?)",
@@ -553,25 +515,15 @@ void command_dart_tap(void) {
                            ok ? "OK (re-rendered)" : "FAILED (no app running?)");
 }
 
-//! DIAG (throwaway, INV2): word-swap instrumentation readouts from the engine.
-//! csp diag = anomalous branch-copy overlaps (runtime-vs-validator stack
-//! divergence sites); field diag = i64 struct-field memory health.
-extern uint32_t wasm_interp_csp_diag(char *buf, uint32_t buf_len);
-extern void wasm_gc_field_diag(char *buf, uint32_t buf_len);
-
 //! `dart status`: report resident-app state + last-failure reason over the BLE console.
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {
-  char buf[1024];
-  char csp[192], fld[96];
-  wasm_interp_csp_diag(csp, sizeof(csp));
-  wasm_gc_field_diag(fld, sizeof(fld));
+  char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s || i64=%s || %s || %s || tr=%s",
+      "dart: running=%s frames=%d fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
-      s_module_fail[0] ? s_module_fail : "(none)",
-      dart_embedder_i64_dbg(), csp, fld, dart_embedder_i64_trace());
+      s_module_fail[0] ? s_module_fail : "(none)");
 }
 
 //! Callback that runs on KernelMain (the launcher task) to start the Counter app.

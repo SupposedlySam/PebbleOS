@@ -73,11 +73,6 @@ static void prv_psram_bringup_cb(void *unused) {
 }
 #endif
 
-// DIAG (throwaway, INV2): dart_app_start stage callback -> APP_LOG (reaches BLE via 2006).
-static void prv_stage_log(const char *stage) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "cstage: %s", stage);
-}
-
 static void prv_fail(CounterData *data, const char *why) {
   data->failed = true;
   layer_mark_dirty(window_get_root_layer(data->window));
@@ -105,14 +100,7 @@ static void prv_start(void *ctx) {
     }
   }
 #endif
-  // DIAG (throwaway, INV2): real-time stage markers over BLE (APP_LOG -> endpoint 2006) so
-  // we can see WHERE dart_app_start crashes on the app task (dart counter reboots) vs
-  // KernelBG (dart flutter works). The reboot clears RAM, so only live emission survives.
-  APP_LOG(APP_LOG_LEVEL_INFO, "cstage: pre-dart_app_start");
-  dart_set_stage_cb(prv_stage_log);
   bool dart_ok = dart_app_start_flutter_counter();
-  dart_set_stage_cb(NULL);
-  APP_LOG(APP_LOG_LEVEL_INFO, "cstage: post-dart_app_start ok=%d", (int)dart_ok);
   if (!dart_ok) {
     prv_fail(data, "dart_app_start_flutter_counter failed");
   }

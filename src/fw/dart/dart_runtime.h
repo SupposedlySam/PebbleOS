@@ -44,12 +44,6 @@ void dart_app_stop(void);
 //! true on success. Used by the `dart flutter` console command and the Counter app.
 bool dart_app_start_flutter_counter(void);
 
-//! DIAG (throwaway, INV2): register a callback invoked with a short stage name ("load",
-//! "instantiate", "exec_env", "invokeMain", "evloop", "evloop-done") before each phase of
-//! dart_app_start, so the Counter app can APP_LOG real-time markers over BLE to localize
-//! where it crashes on the app task (the reboot clears RAM). NULL clears. Remove once fixed.
-void dart_set_stage_cb(void (*cb)(const char *stage));
-
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);
