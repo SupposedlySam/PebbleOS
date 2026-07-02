@@ -8,9 +8,21 @@
 //! headers that firmware TUs must not include. Declared here so both sides share
 //! one compiler-checked signature.
 
+#include <stdint.h>
+
 //! Re-bind an exec env's thread handle and native-stack-overflow boundary to the
 //! CURRENT task. Required before entering a shared exec env from a task other
 //! than the one that last entered it: the overflow guard compares SP against the
 //! bound task's stack, so a stale binding either hard-faults or never trips.
 //! @param exec_env a wasm_exec_env_t (void* to keep engine types out of here).
 void wamr_pebble_bind_exec_env_to_current_task(void *exec_env);
+
+//! Raw element storage of a wasm GC array whose elements are 4 bytes wide
+//! (i32/f32), or NULL for any other element size. Lets bulk consumers (the
+//! presentFrame pixel blit) iterate the data directly instead of paying the
+//! per-element accessor's rtt lookup tens of thousands of times per frame.
+//! The pointer aliases live GC-heap storage: use it only while the array is
+//! rooted (e.g. within the native call that received it) and do not hold it
+//! across any call that can run wasm or GC.
+//! @param array_obj a wasm_array_obj_t.
+const uint32_t *wamr_pebble_array_u32_data(void *array_obj);

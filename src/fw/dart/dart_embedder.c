@@ -18,6 +18,7 @@
 
 #include "wasm_export.h"
 #include "gc_export.h"
+#include "wamr_pebble_glue.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -722,11 +723,23 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
       PBL_LOG_ALWAYS("dart present: no RAM for frame snapshot; ssapp disabled");
     }
   }
+  /* Read the wasm array's element storage directly (glue verifies 4-byte
+     elements) instead of calling the per-element accessor 45k times per frame
+     -- the accessor re-derives the element size from the rtt on every call,
+     which is measurable at panel resolution. The array stays rooted for the
+     whole native call and nothing below runs wasm/GC, so the raw pointer is
+     safe for the duration (see wamr_pebble_glue.h). */
+  const uint32_t *px_data = wamr_pebble_array_u32_data(argb);
   for (int32_t y = 0; y < rows; y++) {
     for (int32_t x = 0; x < cols; x++) {
-      wasm_value_t v;
-      wasm_array_obj_get_elem(argb, (uint32_t)(y * w + x), false, &v);
-      uint32_t px = (uint32_t)v.i32;
+      uint32_t px;
+      if (px_data) {
+        px = px_data[y * w + x];
+      } else {
+        wasm_value_t v;
+        wasm_array_obj_get_elem(argb, (uint32_t)(y * w + x), false, &v);
+        px = (uint32_t)v.i32;
+      }
       GColor8 c = GColorFromRGB((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
       fb[y * rs + x] = c.argb;
       if (s_frame_snap) {

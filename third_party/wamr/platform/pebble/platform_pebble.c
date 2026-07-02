@@ -24,10 +24,21 @@
    with the engine's defines (firmware TUs are not). */
 #include "wamr_pebble_glue.h"
 #include "wasm_exec_env.h"
+#include "gc_object.h"
 void
 wamr_pebble_bind_exec_env_to_current_task(void *exec_env)
 {
     wasm_exec_env_set_thread_info((WASMExecEnv *)exec_env);
+}
+
+const uint32_t *
+wamr_pebble_array_u32_data(void *array_obj)
+{
+    WASMArrayObjectRef arr = (WASMArrayObjectRef)array_obj;
+    if (!arr || wasm_array_obj_elem_size_log(arr) != 2) {
+        return NULL;
+    }
+    return (const uint32_t *)wasm_array_obj_first_elem_addr(arr);
 }
 
 /* ---- lifecycle ---- */

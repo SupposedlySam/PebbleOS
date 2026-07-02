@@ -102,6 +102,11 @@ if bld.env.CONFIG_DART_RUNTIME:
     compat = bld.path.find_node('platform/pebble/wamr_compat.h').abspath()
 
     wamr_cflags = [
+        # Speed-optimize the engine (overrides the firmware-wide -Os; last -O
+        # wins). The classic interpreter's dispatch loop is the hot path for
+        # everything Flutter does on-device; -Os costs real frame time. Flash
+        # has ~1MB headroom for the code growth.
+        '-O2',
         '-include', compat,
         '-Wno-unused-parameter',
         '-Wno-unused-variable',
