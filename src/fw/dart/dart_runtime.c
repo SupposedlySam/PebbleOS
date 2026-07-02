@@ -483,19 +483,28 @@ void command_dart_test(void) {
 static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   *size_out = 0;
   if (!dart_runtime_init()) {
+    strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     return NULL;
   }
   size_t sz = resource_size(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM);
   if (sz == 0) {
-    return NULL; /* resource missing */
+    strncpy(s_module_fail, "counter resource missing", sizeof(s_module_fail) - 1);
+    return NULL;
   }
   uint8_t *buf = (uint8_t *)wasm_runtime_malloc(sz);
   if (!buf) {
+    /* The classic cause: the runtime initialized before `psram 2`, so the
+       cached allocator is the small SRAM heap and a 1.18MB module can't fit.
+       Recovery: `reset`, then `psram 2` BEFORE any dart command. */
+    snprintf(s_module_fail, sizeof(s_module_fail),
+             "no RAM for %u-byte module (psram before first dart?)", (unsigned)sz);
     return NULL;
   }
   size_t rd = resource_load_byte_range_system(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM,
                                               0, buf, sz);
   if (rd != sz) {
+    snprintf(s_module_fail, sizeof(s_module_fail), "resource short read %u/%u",
+             (unsigned)rd, (unsigned)sz);
     wasm_runtime_free(buf);
     return NULL;
   }
