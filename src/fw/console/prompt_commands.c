@@ -1633,28 +1633,24 @@ void command_perftest_text_all(void) {
 #ifdef CONFIG_DART_RUNTIME
 #include "dart/dart_embedder.h"
 
-/* Hex-dump the system framebuffer over the BLE console so a Mac-side script can
-   decode it to PNG. Lines are short (SS:RRR:CC HHHH..., 32 bytes → 74 chars)
-   to stay within the 80-char AppLog limit. The Python side collects all lines
-   bracketed by SS:BEGIN / SS:END and assembles the image.
-   Layout: 168 rows × 144 cols, 8-bit GColor8 (AARRGGBB 2-bit per channel). */
-/* Emit framebuffer rows [y0, y1) as SS: lines. THROTTLED: without a pace between
-   rows the ~1600 prompt_send_response messages overrun the BLE/PPoG buffer and wedge
-   the session mid-stream (~row 51). psleep(120)/row keeps emit under the BLE drain
-   rate so the full stream completes. SS:BEGIN always reports full DISP dims; the
-   decoder fills only the rows present, so a sub-range is a valid partial image. */
-/* Emit rows [y0,y1) of an 8-bit-GColor buffer as SS: hex lines. `base`/`stride`/`cols`
-   describe the buffer; `total_rows` is reported in the SS:BEGIN header (the decoder fills
-   only the rows present). Used for both the system framebuffer (what the panel shows) and
-   the app framebuffer (what a resident app -- e.g. Flutter via `dart flutter` -- painted,
-   even when it is not the foreground surface). See the burst-limit note above. */
-static void prv_emit_buf_rows(const uint8_t *base, int stride, int cols, int total_rows,
+/* Emit rows [y0,y1) of a contiguous 8-bit-GColor pixel buffer (`cols` wide,
+   `total_rows` tall) as SS: hex lines over the BLE console; a Mac-side script
+   (pebble_ss_decode.py) reassembles them into a PNG. Serves both the system
+   framebuffer (what the panel shows) and the Dart embedder's last-frame
+   snapshot. Protocol: SS:BEGIN <cols> <total_rows>, then SS:<row>:<col> <hex>
+   chunks (32 bytes -> 74 chars, under the 80-char AppLog line limit), then
+   SS:END. The header always reports FULL dims and the decoder fills only the
+   rows present, so a sub-range is a valid partial image. Rows are paced
+   (psleep) to the BLE drain rate, but pacing alone cannot prevent the ~290-
+   message cumulative PPoG wedge -- callers keep each range to ~20-25 rows and
+   the host stitches (see pebble_screen.sh). */
+static void prv_emit_buf_rows(const uint8_t *base, int cols, int total_rows,
                               int y0, int y1) {
   char line[80];
   static const char s_hex[] = "0123456789abcdef";
   prompt_send_response_fmt(line, sizeof(line), "SS:BEGIN %d %d", cols, total_rows);
   for (int y = y0; y < y1; y++) {
-    const uint8_t *row = base + (size_t)y * stride;
+    const uint8_t *row = base + (size_t)y * cols;
     for (int col = 0; col < cols; col += 32) {
       int end = col + 32 < cols ? col + 32 : cols;
       char chunk[65]; /* 32 bytes × 2 hex chars + NUL */
@@ -1673,13 +1669,15 @@ static void prv_emit_buf_rows(const uint8_t *base, int stride, int cols, int tot
 
 static void prv_emit_screenshot_rows(int y0, int y1) {
   FrameBuffer *fb = compositor_get_framebuffer();
-  prv_emit_buf_rows(framebuffer_get_line(fb, 0), DISP_COLS, DISP_COLS, DISP_ROWS, y0, y1);
+  prv_emit_buf_rows(framebuffer_get_line(fb, 0), DISP_COLS, DISP_ROWS, y0, y1);
 }
 
 /* Emits the Dart embedder's SNAPSHOT of the last frame Flutter presented -- NOT the live
    app framebuffer: that buffer belongs to the foreground app (app_state_get_framebuffer is
    task-local), which repaints over Flutter's console-path blit, so reading it live races
-   the watchface and loses. The snapshot persists until the next presentFrame. */
+   the watchface and loses. The snapshot persists until the next presentFrame; a present
+   landing mid-dump can yield a torn (half old, half new) image -- acceptable for a
+   diagnostic readback, just re-grab. */
 static void prv_emit_app_rows(int y0, int y1) {
   int32_t w = 0, h = 0;
   const uint8_t *snap = dart_embedder_frame_snapshot(&w, &h);
@@ -1689,11 +1687,29 @@ static void prv_emit_app_rows(int y0, int y1) {
     return;
   }
   if (y1 > h) y1 = h;
-  prv_emit_buf_rows(snap, w, w, h, y0, y1);
+  prv_emit_buf_rows(snap, w, h, y0, y1);
 }
 
 void command_screenshot(void) {
   prv_emit_screenshot_rows(0, DISP_ROWS);
+}
+
+/* Parse a `<start> <count>` row range, clamping the start to >= 0. `max_rows` <= 0
+   skips the upper clamp (the emitter clamps against dims it alone knows). Returns
+   false (and reports) when the range is empty. */
+static bool prv_parse_row_range(const char *start_str, const char *count_str,
+                                int max_rows, int *y0_out, int *y1_out) {
+  int y0 = atoi(start_str);
+  int y1 = y0 + atoi(count_str);
+  if (y0 < 0) y0 = 0;
+  if (max_rows > 0 && y1 > max_rows) y1 = max_rows;
+  if (y0 >= y1) {
+    prompt_send_response("bad range");
+    return false;
+  }
+  *y0_out = y0;
+  *y1_out = y1;
+  return true;
 }
 
 /* `ssrows <start> <count>`: emit only that row range of the system framebuffer. Distinct
@@ -1701,32 +1717,22 @@ void command_screenshot(void) {
    and rejects the args). Keep each grab small (~20-25 rows): a sustained burst of ~290+
    AppLog messages wedges the PPoG stream, so the host stitches several sub-range grabs. */
 void command_screenshot_rows(const char *start_str, const char *count_str) {
-  int y0 = atoi(start_str);
-  int n = atoi(count_str);
-  int y1 = y0 + n;
-  if (y0 < 0) y0 = 0;
-  if (y1 > DISP_ROWS) y1 = DISP_ROWS;
-  if (y0 >= y1) {
-    prompt_send_response("bad range");
-    return;
+  int y0, y1;
+  if (prv_parse_row_range(start_str, count_str, DISP_ROWS, &y0, &y1)) {
+    prv_emit_screenshot_rows(y0, y1);
   }
-  prv_emit_screenshot_rows(y0, y1);
 }
 
-/* `ssapp <start> <count>`: like ssrows, but dumps the APP framebuffer -- what a resident
-   Flutter app painted via `dart flutter`, readable even when the watchface owns the panel.
-   Lets us verify Flutter's output + the counter value without foregrounding the (flaky,
-   small-stack) Counter app. */
+/* `ssapp <start> <count>`: like ssrows, but dumps the Dart embedder's last-presented-frame
+   snapshot -- what a resident Flutter app painted via `dart flutter`, readable even when
+   the watchface owns the panel. Lets us verify Flutter's output without foregrounding the
+   Counter app. */
 void command_screenshot_app_rows(const char *start_str, const char *count_str) {
-  int y0 = atoi(start_str);
-  int n = atoi(count_str);
-  int y1 = y0 + n;
-  if (y0 < 0) y0 = 0;
-  if (y0 >= y1) {
-    prompt_send_response("bad range");
-    return;
+  int y0, y1;
+  /* No upper clamp here: only the emitter knows the snapshot's dims. */
+  if (prv_parse_row_range(start_str, count_str, 0, &y0, &y1)) {
+    prv_emit_app_rows(y0, y1);
   }
-  prv_emit_app_rows(y0, y1);
 }
 #endif
 

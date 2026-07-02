@@ -19,16 +19,13 @@
 
 #include "wasm_runtime.h"
 
-/* Re-bind an exec env's thread handle + native-stack boundary to the CURRENT
-   task. The dart runtime's single exec env is entered from both KernelBG (the
-   console path) and the app task (button clicks); the stack-overflow guard set
-   at creation time describes the creating task's stack, so every cross-task
-   entry must re-bind or the guard compares against the wrong stack. Lives here
-   because wasm_exec_env_set_thread_info is an internal header and this TU is
-   compiled with the engine's defines (firmware TUs are not). */
+/* See wamr_pebble_glue.h for the contract. Lives here because
+   wasm_exec_env_set_thread_info is an internal header and this TU is compiled
+   with the engine's defines (firmware TUs are not). */
+#include "wamr_pebble_glue.h"
 #include "wasm_exec_env.h"
 void
-dart_wamr_bind_exec_env_to_current_task(void *exec_env)
+wamr_pebble_bind_exec_env_to_current_task(void *exec_env)
 {
     wasm_exec_env_set_thread_info((WASMExecEnv *)exec_env);
 }
@@ -137,6 +134,10 @@ os_thread_get_stack_boundary(void)
        console/dev path) and the app task (button clicks) -- the embedder must
        re-bind the boundary at each cross-task entry (see dart_runtime.c). */
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    /* 24 comfortably exceeds the firmware's task count (~15); static because
+       ~1KB is too much for small task stacks. Concurrent callers would race the
+       buffer, but every caller path is serialized by the dart runtime's app
+       mutex (dart_runtime.c). */
     static TaskStatus_t statuses[24];
     UBaseType_t n = uxTaskGetSystemState(statuses,
                                          sizeof(statuses) / sizeof(statuses[0]),
@@ -146,7 +147,10 @@ os_thread_get_stack_boundary(void)
             return (uint8_t *)statuses[i].pxStack;
         }
     }
-    return NULL; /* unknown task: guard disabled, previous behavior */
+    /* Task not found (or >24 tasks): NULL disables the overflow guard, which is
+       exactly the hard-fault this function exists to prevent -- say so. */
+    dbgserial_putstr("wamr: stack boundary unknown for current task; overflow guard OFF\r\n");
+    return NULL;
 }
 
 void

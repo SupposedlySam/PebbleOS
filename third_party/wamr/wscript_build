@@ -115,7 +115,9 @@ if bld.env.CONFIG_DART_RUNTIME:
         '-fno-strict-aliasing',
     ]
 
-    bld(export_includes=[core + '/iwasm/include'], name='wamr_includes')
+    # iwasm/include = the engine's public API; platform/pebble = our glue exports
+    # (wamr_pebble_glue.h) implemented in TUs compiled with the engine's defines.
+    bld(export_includes=[core + '/iwasm/include', 'platform/pebble'], name='wamr_includes')
 
     bld.stlib(source=wamr_sources,
               target='wamr',

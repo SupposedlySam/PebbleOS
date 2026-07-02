@@ -53,8 +53,13 @@ static HStr *prv_hstr_new(uint32_t length) {
 
 static void prv_hstr_push(HStr *b, uint16_t u) {
   if (b->length == b->capacity) {
+    uint16_t *grown =
+        (uint16_t *)kernel_realloc(b->data, b->capacity * 2 * sizeof(uint16_t));
+    if (!grown) {
+      return; /* OOM: drop the unit rather than deref NULL; string truncates */
+    }
+    b->data = grown;
     b->capacity *= 2;
-    b->data = (uint16_t *)kernel_realloc(b->data, b->capacity * sizeof(uint16_t));
   }
   b->data[b->length++] = u;
 }
@@ -626,13 +631,15 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
    quiesces) or a cap trips. Public so dart_runtime.c can pump it after the
    module's main() returns and after each injected input. */
 void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) {
+  /* The guard caps runaway callback chains (an app rescheduling itself forever)
+     without tripping on real workloads: a Flutter frame drains in tens of tasks. */
   int guard = 0;
   while ((s_micro_n > 0 || s_timer_n > 0) && guard++ < 200000) {
     while (s_micro_n > 0) {
       EvTask t = s_micro[0];
       memmove(s_micro, s_micro + 1, (size_t)(--s_micro_n) * sizeof(EvTask));
       prv_ev_invoke(env, &t);
-      if (wasm_runtime_get_exception(inst)) { prv_ev_release_roots(env); return; }
+      if (wasm_runtime_get_exception(inst)) goto out;
     }
     if (s_timer_n > 0) {
       int best = 0, i;
@@ -643,9 +650,10 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) 
       memmove(s_timer + best, s_timer + best + 1, (size_t)(s_timer_n - best - 1) * sizeof(EvTask));
       s_timer_n--;
       prv_ev_invoke(env, &t);
-      if (wasm_runtime_get_exception(inst)) { prv_ev_release_roots(env); return; }
+      if (wasm_runtime_get_exception(inst)) goto out;
     }
   }
+out:
   prv_ev_release_roots(env);
 }
 
@@ -658,7 +666,6 @@ static bool s_frame_presented;
 static int s_frame_count;
 bool dart_embedder_frame_presented(void) { return s_frame_presented; }
 int dart_embedder_frame_count(void) { return s_frame_count; }
-void dart_embedder_reset_frame(void) { s_frame_presented = false; s_frame_count = 0; }
 
 /* Snapshot of the last presented frame (GColor8, stride == s_snap_w). Allocated from
    the WAMR pool (PSRAM) on first present, kept for the runtime's lifetime: presentFrame
@@ -670,6 +677,16 @@ const uint8_t *dart_embedder_frame_snapshot(int32_t *w_out, int32_t *h_out) {
   *w_out = s_snap_w;
   *h_out = s_snap_h;
   return s_frame_snap;
+}
+
+void dart_embedder_reset_frame(void) {
+  s_frame_presented = false;
+  s_frame_count = 0;
+  if (s_frame_snap) {
+    /* Clear the pixels too, or `ssapp` between app stop and the next first
+       present serves the PREVIOUS app's frame as if it were current. */
+    memset(s_frame_snap, 0, (size_t)(s_snap_w * s_snap_h));
+  }
 }
 
 /* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the APP
@@ -700,6 +717,9 @@ static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t argb,
       memset(s_frame_snap, 0, (size_t)(fbw * fbh));
       s_snap_w = fbw;
       s_snap_h = fbh;
+    } else {
+      /* Rendering still works; only the `ssapp` console readback degrades. */
+      PBL_LOG_ALWAYS("dart present: no RAM for frame snapshot; ssapp disabled");
     }
   }
   for (int32_t y = 0; y < rows; y++) {

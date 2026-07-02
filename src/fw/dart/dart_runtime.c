@@ -20,6 +20,8 @@
 #include "kernel/event_loop.h"
 #include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
+#include "os/mutex.h"
+#include "wamr_pebble_glue.h"
 #include "pbl/services/system_task.h"
 #include "process_management/app_manager.h"
 #include "system/logging.h"
@@ -78,27 +80,21 @@
 static bool s_initialized = false;
 
 /* WASM memory source. A real dart2wasm module needs far more than the SRAM
-   kernel heap can give (the hello module alone needs >194 KB: ~67 KB writable
-   copy + the GC heap for its constant object graph + instance state). On
-   obelix the production source is a pool over PSRAM @0x60000000 (Alloc_With_Pool)
-   — pending PSRAM bring-up. Until then we use the system allocator (kernel
-   heap) and fail gracefully when a module doesn't fit (proven on QEMU/Emery:
-   init + load succeed; instantiate is gated on RAM). A dedicated pool can be
-   provided by overriding dart_runtime_pool() (weak) to return a PSRAM region. */
+   kernel heap can give (the Flutter module needs ~5.5 MB). On obelix the
+   production source is a pool over PSRAM @0x60000000 (Alloc_With_Pool),
+   returned below once `psram 2` has brought the controller up; the kernel-heap
+   fallback covers boards without PSRAM (proven on QEMU/Emery: init + load
+   succeed; instantiate is gated on RAM). Override dart_runtime_pool() (weak)
+   to supply a different region. */
 __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  // Once `psram` has brought up the 16 MB PSRAM, back the WAMR pool with it so
-  // the full module's 67 KB copy + GC heap + linear memory fit. Bring up PSRAM
-  // (run `psram`) BEFORE the first dart command so this is seen at WAMR init.
+  // Bring up PSRAM (run `psram 2`) BEFORE the first dart command: WAMR init
+  // caches its allocator, so a pool that appears later is never seen.
   if (sf32lb52_psram_is_ready()) {
     *buf = (void *)SF32LB52_PSRAM_BASE;
-    // TEMP (bypassing sf32lb52_psram_size): the USABLE probe reports 0KB even with the PSRAM
-    // window now cacheable, but that probe forces a whole-cache CleanInvalidate round-trip which
-    // may not reflect NORMAL coherent cached access (how WAMR/dart actually use the pool: writes
-    // and reads both via the D-cache, with natural line eviction/refill to PSRAM). Hand dart a
-    // fixed cached pool and let real use be the test. If sum=45 works, the cached path is good
-    // and the probe just needs fixing; if it corrupts/crashes, cached bulk access is genuinely
-    // broken and we move to write-through / tap / DMA.
+    // Fixed 8MB window rather than sf32lb52_psram_size(): that probe's
+    // whole-cache CleanInvalidate round-trip reports 0KB even though normal
+    // cached access is fine (long since proven by every module run).
     // 8MB of the 16MB PSRAM: the Flutter counter needs ~5.5MB (1.18MB module
     // copy + WAMR load structures + 1MB GC heap + 1MB operand stack + linear
     // memory). 2MB was too small ("allocate memory failed" during load).
@@ -287,16 +283,33 @@ bool dart_run_test_module(void) {
  * Unlike dart_run_module (run-to-completion), this keeps the instance + exec env
  * alive after main() so input can be injected and the UI re-rendered. main()'s
  * runApp queues a warm-up frame via a timer; we drain the event loop to render
- * the first frame, then again after each injected tap. Single resident app. */
+ * the first frame, then again after each injected tap. Single resident app.
+ *
+ * CONCURRENCY: the one exec env is entered from BOTH KernelBG (console commands)
+ * and the app task (button clicks). WAMR exec envs are single-threaded state
+ * (operand stack, frame chain, local-ref frames), and the embedder's event
+ * queues are plain globals -- so every entry point below takes s_app_mutex for
+ * the WHOLE call. A tap arriving while another tap/start is in flight blocks
+ * (seconds, on the interpreter) rather than corrupting the frame chain. */
 static uint8_t *s_app_buf;
 static wasm_module_t s_app_module;
 static wasm_module_inst_t s_app_inst;
 static wasm_exec_env_t s_app_exec_env;
 static wasm_function_inst_t s_app_inject_tap;
+static PebbleMutex *s_app_mutex;
 
-void dart_app_stop(void) {
+static void prv_app_lock(void) {
+  if (!s_app_mutex) {
+    s_app_mutex = mutex_create(); /* first use is single-threaded (console/menu) */
+  }
+  mutex_lock(s_app_mutex);
+}
+static void prv_app_unlock(void) { mutex_unlock(s_app_mutex); }
+
+//! Tear down the resident app. Caller must hold s_app_mutex.
+static void prv_app_stop_locked(void) {
   // Drop the frame-presented flag so the next app launch shows its loading screen until
-  // Flutter paints again. (present-frame now renders through the normal app-framebuffer
+  // Flutter paints again. (present-frame renders through the normal app-framebuffer
   // path, so there is no compositor freeze to undo here.)
   dart_embedder_reset_frame();
   if (s_app_exec_env) { wasm_runtime_destroy_exec_env(s_app_exec_env); s_app_exec_env = NULL; }
@@ -306,15 +319,23 @@ void dart_app_stop(void) {
   s_app_inject_tap = NULL;
 }
 
+void dart_app_stop(void) {
+  prv_app_lock();
+  prv_app_stop_locked();
+  prv_app_unlock();
+}
+
 bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
+  prv_app_lock();
   s_module_fail[0] = '\0';
   if (s_app_inst) {
-    dart_app_stop(); /* one resident app at a time */
+    prv_app_stop_locked(); /* one resident app at a time */
   }
   if (!dart_runtime_init()) {
     wasm_runtime_free(wasm_buf);
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
+    prv_app_unlock();
     return false;
   }
   /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
@@ -367,25 +388,27 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   if (!s_app_inject_tap) {
     PBL_LOG_ALWAYS("dart: app has no injectTap export (input disabled)");
   }
+  /* Note: s_module_fail can be non-empty here (evloop exception / no frame) while
+     we still return true -- "started but degraded"; dart status surfaces it. */
+  prv_app_unlock();
   return true;
 fail:
   task_watchdog_resume(); /* re-arm before bailing (pause was active past the load) */
-  dart_app_stop();
+  prv_app_stop_locked();
+  prv_app_unlock();
   return false;
 }
 
-//! Re-bind the exec env's thread handle + stack-overflow boundary to the current
-//! task (platform_pebble.c). The single dart exec env is entered from KernelBG
-//! (console) AND the app task (button clicks); without the re-bind the guard
-//! compares SP against the CREATING task's stack and deep re-renders hard-fault
-//! instead of trapping.
-extern void dart_wamr_bind_exec_env_to_current_task(void *exec_env);
-
 bool dart_app_inject_tap(double x, double y) {
+  prv_app_lock();
   if (!s_app_exec_env || !s_app_inject_tap) {
+    prv_app_unlock();
     return false;
   }
-  dart_wamr_bind_exec_env_to_current_task(s_app_exec_env);
+  /* The exec env's stack-overflow guard describes the LAST bound task's stack;
+     re-bind to this task (KernelBG console vs app-task buttons) so deep
+     re-renders trap instead of hard-faulting. Serialized by s_app_mutex. */
+  wamr_pebble_bind_exec_env_to_current_task(s_app_exec_env);
   /* injectTap(f64 x, f64 y): two doubles occupy 4 arg cells. */
   uint32_t argv[4];
   memcpy(&argv[0], &x, sizeof(double));
@@ -396,11 +419,13 @@ bool dart_app_inject_tap(double x, double y) {
   if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_tap, 4, argv)) {
     task_watchdog_resume();
     PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
+    prv_app_unlock();
     return false;
   }
   /* tap -> setState -> scheduleFrame queued a frame; drain it -> re-render. */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
   task_watchdog_resume();
+  prv_app_unlock();
   return true;
 }
 
@@ -451,11 +476,6 @@ void command_dart_test(void) {
                            sum_ok ? "VERIFIED" : "NOT VERIFIED", out[0] ? out : "(none)");
 }
 
-//! `dart flutter`: start the resident Flutter counter app and render frame 0
-//! ("0") to the screen, keeping the instance alive so `dart tap` (or a button)
-//! drives it. The ~1.18MB module is too big to embed in the 3MB firmware FLASH,
-//! so it loads from the watch's storage flash; prv_load_flutter_module() returns
-//! the buffer (NULL until the storage-load path is wired).
 //! Load the Flutter counter module (the FLUTTER_COUNTER_WASM resource, shipped in
 //! the resource pack) into a RAM buffer the caller owns. Uses the WAMR pool
 //! allocator (PSRAM) since the module is ~1.18MB; needs the runtime initialized
