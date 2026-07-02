@@ -242,6 +242,39 @@ static void prv_i64_note(int64_t value, int32_t radix) {
   }
 }
 
+/* DIAG (throwaway, INV2): per-call trace of the LAST few i64ToString calls --
+   (call#, value hi:lo, RADIX, first chars of the RETURNED string). The v158
+   contradiction: the screen shows count*2^32 but big0 stayed empty, i.e. this
+   native claims it never formatted the big number. This ring settles it:
+   - radix != 10/16  -> the native-call arg marshalling is corrupt (radix is the
+     canary: WASM always passes 10 here);
+   - value small + buf small while the SCREEN shows big -> the rendered string
+     does NOT come from this native -> trace the interpolate/Paragraph path;
+   - value big -> big0/maxabs accounting was wrong and the value IS corrupt. */
+#define I64_TRACE_N 4
+static struct {
+  int call;
+  int64_t value;
+  int32_t radix;
+  char out[14];
+} s_i64_trace[I64_TRACE_N];
+static int s_i64_trace_head;
+static char s_i64_trace_dbg[224];
+const char *dart_embedder_i64_trace(void) {
+  int len = 0;
+  s_i64_trace_dbg[0] = '\0';
+  for (int k = 0; k < I64_TRACE_N && len < (int)sizeof(s_i64_trace_dbg) - 48; k++) {
+    int i = (s_i64_trace_head - 1 - k + 2 * I64_TRACE_N) % I64_TRACE_N;
+    if (!s_i64_trace[i].call) continue;
+    len += snprintf(s_i64_trace_dbg + len, sizeof(s_i64_trace_dbg) - len,
+                    "[#%d %08x:%08x r%d \"%s\"]", s_i64_trace[i].call,
+                    (unsigned)((uint64_t)s_i64_trace[i].value >> 32),
+                    (unsigned)((uint64_t)s_i64_trace[i].value & 0xffffffffu),
+                    (int)s_i64_trace[i].radix, s_i64_trace[i].out);
+  }
+  return s_i64_trace_dbg;
+}
+
 static wasm_externref_obj_t prv_i64_to_string(wasm_exec_env_t env, int64_t value,
                                               int32_t radix) {
   char buf[72];
@@ -251,6 +284,13 @@ static wasm_externref_obj_t prv_i64_to_string(wasm_exec_env_t env, int64_t value
   } else {
     snprintf(buf, sizeof buf, "%" PRId64, value);
   }
+  s_i64_trace[s_i64_trace_head].call = s_i64_calls;
+  s_i64_trace[s_i64_trace_head].value = value;
+  s_i64_trace[s_i64_trace_head].radix = radix;
+  strncpy(s_i64_trace[s_i64_trace_head].out, buf,
+          sizeof(s_i64_trace[s_i64_trace_head].out) - 1);
+  s_i64_trace[s_i64_trace_head].out[sizeof(s_i64_trace[s_i64_trace_head].out) - 1] = '\0';
+  s_i64_trace_head = (s_i64_trace_head + 1) % I64_TRACE_N;
   return prv_wrap(env, prv_hstr_from_utf8(buf, (uint32_t)strlen(buf)));
 }
 

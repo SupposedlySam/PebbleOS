@@ -40,6 +40,11 @@ const char *dart_embedder_sched_diag(void);
 //! 0xFFFFFFFF-range value then means the Dart int itself is garbage, not arg transit.
 const char *dart_embedder_i64_dbg(void);
 
+//! DIAG (throwaway): the last few i64ToString calls as (call#, value, radix, RETURNED
+//! string prefix). radix != 10/16 = corrupted native-arg marshalling; small value/"1"
+//! while the screen shows count*2^32 = the rendered string is not from this native.
+const char *dart_embedder_i64_trace(void);
+
 //! True once the running Flutter app has painted at least one frame into the app
 //! framebuffer via presentFrame. The Counter app's root layer uses this to draw a
 //! loading screen until the first frame, then leave the framebuffer to Flutter.

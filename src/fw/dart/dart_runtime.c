@@ -567,11 +567,11 @@ void command_dart_status(void) {
   wasm_interp_csp_diag(csp, sizeof(csp));
   wasm_gc_field_diag(fld, sizeof(fld));
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s || i64=%s || %s || %s",
+      "dart: running=%s frames=%d fail=%s || i64=%s || %s || %s || tr=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
       s_module_fail[0] ? s_module_fail : "(none)",
-      dart_embedder_i64_dbg(), csp, fld);
+      dart_embedder_i64_dbg(), csp, fld, dart_embedder_i64_trace());
 }
 
 //! Callback that runs on KernelMain (the launcher task) to start the Counter app.
