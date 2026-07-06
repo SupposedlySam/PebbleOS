@@ -302,12 +302,14 @@ extern void command_dart_flutter(void);
 extern void command_dart_tap(void);
 extern void command_dart_status(void);
 extern void command_dart_gc(void);
+extern void command_dart_reload(void);
 extern void command_dart_counter(void);
 extern void command_screenshot(void);
 extern void command_screenshot_rows(const char *start_str, const char *count_str);
 extern void command_screenshot_app_rows(const char *start_str, const char *count_str);
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
 extern void command_psram(const char *div_str);  // sf32lb52x PSRAM bring-up
+extern void command_psram_precache(const char *div_str);  // + Flutter module precache
 #endif
 #endif
 
@@ -322,12 +324,13 @@ static const Command s_prompt_commands[] = {
   { "dart tap", command_dart_tap, 0 },
   { "dart status", command_dart_status, 0 },
   { "dart gc", command_dart_gc, 0 },
+  { "dart reload", command_dart_reload, 0 },
   { "dart counter", command_dart_counter, 0 },
   { "screenshot", command_screenshot, 0 },
   { "ssrows", command_screenshot_rows, 2 },
   { "ssapp", command_screenshot_app_rows, 2 },
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  { "psram", command_psram, 1 },
+  { "psram", command_psram_precache, 1 },
 #endif
 #endif
 #if KEEP_NON_ESSENTIAL_COMMANDS == 1

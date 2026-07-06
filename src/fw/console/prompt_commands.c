@@ -1632,6 +1632,18 @@ void command_perftest_text_all(void) {
 
 #ifdef CONFIG_DART_RUNTIME
 #include "dart/dart_embedder.h"
+#include "dart/dart_runtime.h"
+
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+//! `psram <div>` + kick the Flutter module precache once the pool exists:
+//! parsing the 1.18MB module is 89% of the app's cold start, so doing it on
+//! KernelBG right after bringup makes the first open feel like a warm one.
+//! Wrapped HERE so the PSRAM driver stays dart-agnostic.
+void command_psram_precache(const char *div_str) {
+  command_psram(div_str);
+  dart_runtime_schedule_precache();
+}
+#endif
 
 /* Emit rows [y0,y1) of a contiguous 8-bit-GColor pixel buffer (`cols` wide,
    `total_rows` tall) as SS: hex lines over the BLE console; a Mac-side script

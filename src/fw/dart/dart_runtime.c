@@ -12,6 +12,7 @@
    into a RAM buffer (see prv_load_flutter_module + M3_PLAN). */
 #include "resource/resource.h"
 #include "resource/resource_ids.auto.h"
+#include "pbl/services/filesystem/pfs.h"
 
 #include "apps/system/flutter_counter/flutter_counter.h"
 #include "console/dbgserial.h"
@@ -540,11 +541,47 @@ void command_dart_test(void) {
 //! the resource pack) into a RAM buffer the caller owns. Uses the WAMR pool
 //! allocator (PSRAM) since the module is ~1.18MB; needs the runtime initialized
 //! first. @return the buffer (free with wasm_runtime_free) or NULL on failure.
+//! PFS filename a pushed module lands in (daemon `__dartpush__`, PutBytes
+//! ObjectFile). Preferred over the baked-in resource so Dart-side iteration
+//! needs no firmware flash: push, `dart reload`, done.
+#define DART_PFS_MODULE "flutter_app.wasm"
+
+//! Load a pushed module from PFS into a pool buffer, or NULL if none exists.
+static uint8_t *prv_load_pfs_module(uint32_t *size_out) {
+  int fd = pfs_open(DART_PFS_MODULE, OP_FLAG_READ, 0, 0);
+  if (fd < 0) {
+    return NULL; /* no pushed module -- normal case */
+  }
+  size_t sz = pfs_get_file_size(fd);
+  uint8_t *buf = sz ? (uint8_t *)wasm_runtime_malloc(sz) : NULL;
+  if (!buf) {
+    pfs_close(fd);
+    snprintf(s_module_fail, sizeof(s_module_fail),
+             "no RAM for %u-byte PFS module", (unsigned)sz);
+    return NULL;
+  }
+  int rd = pfs_read(fd, buf, sz);
+  pfs_close(fd);
+  if (rd != (int)sz) {
+    wasm_runtime_free(buf);
+    snprintf(s_module_fail, sizeof(s_module_fail), "PFS short read %d/%u",
+             rd, (unsigned)sz);
+    return NULL;
+  }
+  PBL_LOG_ALWAYS("dart: loading PUSHED module from PFS (%u bytes)", (unsigned)sz);
+  *size_out = (uint32_t)sz;
+  return buf;
+}
+
 static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   *size_out = 0;
   if (!dart_runtime_init()) {
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     return NULL;
+  }
+  uint8_t *pushed = prv_load_pfs_module(size_out);
+  if (pushed) {
+    return pushed;
   }
   size_t sz = resource_size(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM);
   if (sz == 0) {
@@ -609,6 +646,59 @@ void command_dart_tap(void) {
   bool ok = dart_app_inject_tap(100.0, 114.0);
   prompt_send_response_fmt(buf, sizeof(buf), "dart: tap %s",
                            ok ? "OK (re-rendered)" : "FAILED (no app running?)");
+}
+
+static void prv_launch_counter_cb(void *unused);
+
+//! `dart reload`: drop the cached module and relaunch the Counter app so a
+//! freshly pushed PFS module (daemon dartpush) takes effect -- the app
+//! iteration loop with zero firmware flashes.
+void command_dart_reload(void) {
+  prv_app_lock();
+  prv_app_stop_locked();
+  prv_app_unload_module_locked();
+  prv_app_unlock();
+  launcher_task_add_callback(prv_launch_counter_cb, NULL);
+  prompt_send_response("dart: cache dropped; relaunching Counter");
+}
+
+//! Parse the module on KernelBG so the first app open skips the multi-second
+//! load+validate (89% of cold init). Kicked after PSRAM comes up; no-op when a
+//! module is already cached.
+static void prv_precache_cb(void *unused) {
+  (void)unused;
+  if (prv_app_has_cached_module()) {
+    return;
+  }
+  uint32_t size = 0;
+  uint8_t *buf = prv_load_flutter_module(&size);
+  if (!buf) {
+    PBL_LOG_ALWAYS("dart precache: module load failed (%s)", s_module_fail);
+    return;
+  }
+  prv_app_lock();
+  if (s_app_module) { /* raced an app launch; it won */
+    wasm_runtime_free(buf);
+    prv_app_unlock();
+    return;
+  }
+  char error_buf[128];
+  task_watchdog_pause(240);
+  s_app_buf = buf;
+  s_app_module = wasm_runtime_load(s_app_buf, size, error_buf, sizeof(error_buf));
+  task_watchdog_resume();
+  if (!s_app_module) {
+    wasm_runtime_free(s_app_buf);
+    s_app_buf = NULL;
+    PBL_LOG_ALWAYS("dart precache: parse failed: %s", error_buf);
+  } else {
+    PBL_LOG_ALWAYS("dart precache: module parsed + cached");
+  }
+  prv_app_unlock();
+}
+
+void dart_runtime_schedule_precache(void) {
+  system_task_add_callback(prv_precache_cb, NULL);
 }
 
 //! DIAG (throwaway, INV2): `dart gc` -- force a collection with live phase

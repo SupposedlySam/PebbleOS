@@ -48,6 +48,10 @@ void dart_app_stop(void);
 //! true on success. Used by the `dart flutter` console command and the Counter app.
 bool dart_app_start_flutter_counter(void);
 
+//! Parse + cache the Flutter module on KernelBG so the first app open skips
+//! load+validate. Call after PSRAM is up; no-op if already cached.
+void dart_runtime_schedule_precache(void);
+
 //! Run a tiny no-GC wasm module (add(40,2)==42) to verify WAMR executes wasm in
 //! the firmware. Small enough to run from SRAM (no PSRAM needed).
 bool dart_run_wasm_smoketest(void);
