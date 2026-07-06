@@ -458,10 +458,15 @@ fail:
   return false;
 }
 
-bool dart_app_inject_tap(double x, double y) {
-  prv_app_lock();
+//! Dispatch one tap's pointer events WITHOUT rendering. Flutter semantics:
+//! the Listener's handler (setState/count++) runs synchronously here -- cheap
+//! interpreted work -- and the framework's scheduleFrame merely QUEUES a frame
+//! callback (idempotent across multiple dispatches). Callers batch N
+//! dispatches then dart_app_pump() once, so N presses cost ONE render showing
+//! the final state (3 -> +10 presses -> 13), exactly like Flutter on any
+//! other platform. Caller must hold s_app_mutex.
+static bool prv_dispatch_tap_locked(double x, double y) {
   if (!s_app_exec_env || !s_app_inject_tap) {
-    prv_app_unlock();
     return false;
   }
   /* The exec env's stack-overflow guard describes the LAST bound task's stack;
@@ -472,22 +477,43 @@ bool dart_app_inject_tap(double x, double y) {
   uint32_t argv[4];
   memcpy(&argv[0], &x, sizeof(double));
   memcpy(&argv[2], &y, sizeof(double));
-  /* tap -> setState -> scheduleFrame -> build/layout/paint is also heavy on the
-     interpreter; pause the watchdog around it (see dart_app_start). */
-  task_watchdog_pause(240);
-  uint32_t t_tap_ms = (uint32_t)bh_get_tick_ms();
   if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_tap, 4, argv)) {
-    task_watchdog_resume();
     PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
-    prv_app_unlock();
     return false;
   }
-  /* tap -> setState -> scheduleFrame queued a frame; drain it -> re-render. */
-  dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
-  s_last_tap_ms = (uint32_t)bh_get_tick_ms() - t_tap_ms;
-  task_watchdog_resume();
-  prv_app_unlock();
   return true;
+}
+
+//! Drain the event loop (renders any frame the dispatches scheduled). Caller
+//! must hold s_app_mutex.
+static void prv_pump_locked(void) {
+  if (!s_app_exec_env) {
+    return;
+  }
+  task_watchdog_pause(240);
+  uint32_t t_ms = (uint32_t)bh_get_tick_ms();
+  dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  s_last_tap_ms = (uint32_t)bh_get_tick_ms() - t_ms;
+  task_watchdog_resume();
+}
+
+bool dart_app_dispatch_taps(int count, double x, double y) {
+  prv_app_lock();
+  bool ok = true;
+  task_watchdog_pause(240);
+  for (int i = 0; i < count && ok; i++) {
+    ok = prv_dispatch_tap_locked(x, y);
+  }
+  task_watchdog_resume();
+  if (ok) {
+    prv_pump_locked(); /* one render for the whole batch */
+  }
+  prv_app_unlock();
+  return ok;
+}
+
+bool dart_app_inject_tap(double x, double y) {
+  return dart_app_dispatch_taps(1, x, y);
 }
 
 bool dart_app_is_running(void) {

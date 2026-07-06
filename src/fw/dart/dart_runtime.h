@@ -40,6 +40,12 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size);
 //! @return true if the tap dispatched without trapping.
 bool dart_app_inject_tap(double x, double y);
 
+//! Deliver [count] taps as a BATCH: all pointer events dispatch first (each is
+//! cheap -- the handler mutates state and the framework's scheduleFrame
+//! coalesces), then ONE event-loop drain renders the final state. Flutter
+//! semantics for burst input: N presses -> one frame showing the net result.
+bool dart_app_dispatch_taps(int count, double x, double y);
+
 //! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
 void dart_app_stop(void);
 

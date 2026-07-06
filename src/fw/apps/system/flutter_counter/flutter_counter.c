@@ -65,12 +65,16 @@ static AppTimer *s_tap_drain_timer;
 
 static void prv_tap_drain(void *context) {
   s_tap_drain_timer = NULL;
-  if (s_pending_taps <= 0) {
+  int batch = s_pending_taps;
+  if (batch <= 0) {
     return;
   }
-  s_pending_taps--;
-  dart_app_inject_tap(100.0, 114.0);
-  if (s_pending_taps > 0) {
+  s_pending_taps = 0;
+  /* Dispatch the whole burst, render ONCE with the net state (Flutter
+     semantics: presses mutate state immediately; the next frame shows the
+     latest value -- no queued replay of intermediate frames). */
+  dart_app_dispatch_taps(batch, 100.0, 114.0);
+  if (s_pending_taps > 0) { /* presses arrived during the render */
     s_tap_drain_timer = app_timer_register(1, prv_tap_drain, NULL);
   }
 }
