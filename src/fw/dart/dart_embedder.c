@@ -37,16 +37,28 @@ typedef struct {
   int is_buffer;
 } HStr;
 
+/* HStr storage draws from the WAMR pool (8MB PSRAM), NOT the SRAM kernel
+   heap: HStrs are freed only when the wasm GC runs their finalizers, and the
+   low-garbage render pipeline can defer GC for many frames -- long enough for
+   per-frame strings to exhaust the small kernel heap (the count~8/19 "safely
+   rebooted due to OOM"). The pool has three orders of magnitude more headroom
+   and the GC's own heap lives there anyway. */
+static void *prv_hstr_alloc(uint32_t size) {
+  void *p = wasm_runtime_malloc(size);
+  if (p) memset(p, 0, size);
+  return p;
+}
+
 static HStr *prv_hstr_new(uint32_t length) {
-  HStr *s = (HStr *)kernel_zalloc(sizeof(HStr));
+  HStr *s = (HStr *)prv_hstr_alloc(sizeof(HStr));
   if (!s) {
     return NULL;
   }
   s->length = length;
   s->capacity = length ? length : 8;
-  s->data = (uint16_t *)kernel_malloc(s->capacity * sizeof(uint16_t));
+  s->data = (uint16_t *)wasm_runtime_malloc(s->capacity * sizeof(uint16_t));
   if (!s->data) {
-    kernel_free(s);
+    wasm_runtime_free(s);
     return NULL;
   }
   return s;
@@ -55,7 +67,11 @@ static HStr *prv_hstr_new(uint32_t length) {
 static void prv_hstr_push(HStr *b, uint16_t u) {
   if (b->length == b->capacity) {
     uint16_t *grown =
-        (uint16_t *)kernel_realloc(b->data, b->capacity * 2 * sizeof(uint16_t));
+        (uint16_t *)wasm_runtime_malloc(b->capacity * 2 * sizeof(uint16_t));
+    if (grown) {
+      memcpy(grown, b->data, b->length * sizeof(uint16_t));
+      wasm_runtime_free(b->data);
+    }
     if (!grown) {
       return; /* OOM: drop the unit rather than deref NULL; string truncates */
     }
@@ -67,7 +83,7 @@ static void prv_hstr_push(HStr *b, uint16_t u) {
 
 /* UTF-16 -> UTF-8 into a kernel-malloc'd NUL-terminated buffer (caller frees). */
 static char *prv_hstr_to_utf8(const HStr *s) {
-  char *out = (char *)kernel_malloc(s->length * 3 + 1);
+  char *out = (char *)wasm_runtime_malloc(s->length * 3 + 1);
   uint32_t i, o = 0;
   if (!out) {
     return NULL;
@@ -141,13 +157,13 @@ static void prv_hstr_finalizer(const wasm_obj_t obj, void *data) {
   HStr *s = (HStr *)data;
   (void)obj;
   if (s) {
-    kernel_free(s->data);
-    kernel_free(s);
+    wasm_runtime_free(s->data);
+    wasm_runtime_free(s);
   }
 }
 static void prv_host_free_finalizer(const wasm_obj_t obj, void *data) {
   (void)obj;
-  kernel_free(data);
+  wasm_runtime_free(data);
 }
 
 /* externref <-> HStr* helpers */
@@ -183,7 +199,7 @@ static void prv_print(wasm_exec_env_t env, wasm_externref_obj_t line) {
     if (u) {
       snprintf(s_dart_last_print, sizeof(s_dart_last_print), "%s", u);
     }
-    kernel_free(u);
+    wasm_runtime_free(u);
   } else {
     dbgserial_putstr("(null)");
   }
@@ -515,7 +531,7 @@ static double prv_double_parse_infallible(wasm_exec_env_t env, wasm_externref_ob
   if (!s) return 0.0;
   char *u = prv_hstr_to_utf8(s);
   double d = u ? strtod(u, NULL) : 0.0;
-  kernel_free(u);
+  wasm_runtime_free(u);
   return d;
 }
 typedef struct { double value; } DoubleBox;
@@ -527,14 +543,14 @@ static wasm_externref_obj_t prv_double_try_parse(wasm_exec_env_t env, wasm_exter
   char *endp = NULL;
   double d = strtod(u, &endp);
   int ok = (endp != u && *endp == '\0');
-  kernel_free(u);
+  wasm_runtime_free(u);
   if (!ok) return NULL;
-  DoubleBox *box = (DoubleBox *)kernel_malloc(sizeof(DoubleBox));
+  DoubleBox *box = (DoubleBox *)wasm_runtime_malloc(sizeof(DoubleBox));
   if (!box) return NULL;
   box->value = d;
   wasm_externref_obj_t ref = wasm_externref_obj_new(env, box);
   if (ref) wasm_obj_set_gc_finalizer(env, (wasm_obj_t)ref, prv_host_free_finalizer, box);
-  else kernel_free(box);
+  else wasm_runtime_free(box);
   return ref;
 }
 static double prv_try_parse_result_get_double(wasm_exec_env_t env, wasm_externref_obj_t result) {
