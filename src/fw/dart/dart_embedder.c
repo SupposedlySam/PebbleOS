@@ -27,6 +27,9 @@
 /* The firmware builds -ffreestanding with a reduced libc header set; strtod is
    implemented by dart_libc_shim.c but not declared by the in-scope headers. */
 extern double strtod(const char *nptr, char **endptr);
+/* libm (newlib) is linked; the freestanding math.h omits these decls. */
+extern double sin(double), cos(double), asin(double), exp(double), log(double);
+/* atan2/pow are not in the firmware libm subset -- provided below. */
 
 /* ---- host string object (UTF-16), wrapped as externref ---- */
 typedef struct {
@@ -562,13 +565,125 @@ static double prv_try_parse_result_get_double(wasm_exec_env_t env, wasm_externre
   DoubleBox *box = result ? (DoubleBox *)wasm_externref_obj_get_value(result) : NULL;
   return box ? box->value : 0.0;
 }
-static int s_expando_marker, s_regexp_marker;
+static int s_regexp_marker;
+
+/* Persistent GC roots for weakref/expando targets+values (documented strong-ref
+   cheat: pinned alive for the app's lifetime). Uses the local-obj-ref stack,
+   which is a GC root and IS linked (wasm_runtime_pin_object is not). */
+#define DART_PIN_MAX 1024
+static WASMLocalObjectRef s_pins[DART_PIN_MAX];
+static int s_pin_n;
+static void prv_pin(wasm_exec_env_t env, wasm_obj_t obj) {
+  if (!obj || s_pin_n >= DART_PIN_MAX) return;
+  wasm_runtime_push_local_obj_ref(env, &s_pins[s_pin_n]);
+  s_pins[s_pin_n].val = obj;
+  s_pin_n++;
+}
+
+/* Expando: per-expando linked list of (hash, target) -> value. */
+typedef struct DartExpandoEntry {
+  int64_t hash;
+  wasm_obj_t target;
+  wasm_obj_t value;
+  struct DartExpandoEntry *next;
+} DartExpandoEntry;
+typedef struct { DartExpandoEntry *head; } DartExpandoHead;
+
 static wasm_externref_obj_t prv_expando_create(wasm_exec_env_t env) {
-  return wasm_externref_obj_new(env, &s_expando_marker);
+  DartExpandoHead *h = (DartExpandoHead *)wasm_runtime_malloc(sizeof(DartExpandoHead));
+  if (!h) return NULL;
+  h->head = NULL;
+  wasm_externref_obj_t ref = wasm_externref_obj_new(env, h);
+  if (!ref) { wasm_runtime_free(h); return NULL; }
+  return ref;
 }
 static wasm_obj_t prv_expando_get(wasm_exec_env_t env, wasm_externref_obj_t expando,
                                   wasm_obj_t target, int64_t hash) {
+  (void)env;
+  if (!expando) return NULL;
+  DartExpandoHead *h = (DartExpandoHead *)wasm_externref_obj_get_value(expando);
+  if (!h) return NULL;
+  for (DartExpandoEntry *e = h->head; e; e = e->next) {
+    if (e->hash == hash && e->target == target) return e->value;
+  }
   return NULL;
+}
+static void prv_expando_set(wasm_exec_env_t env, wasm_externref_obj_t expando,
+                            wasm_obj_t target, int64_t hash, wasm_obj_t value) {
+  if (!expando) return;
+  DartExpandoHead *h = (DartExpandoHead *)wasm_externref_obj_get_value(expando);
+  if (!h) return;
+  DartExpandoEntry *prev = NULL;
+  for (DartExpandoEntry *e = h->head; e; prev = e, e = e->next) {
+    if (e->hash == hash && e->target == target) {
+      if (!value) { if (prev) prev->next = e->next; else h->head = e->next; wasm_runtime_free(e); }
+      else { e->value = value; prv_pin(env, value); }
+      return;
+    }
+  }
+  if (!value) return;
+  DartExpandoEntry *e = (DartExpandoEntry *)wasm_runtime_malloc(sizeof(DartExpandoEntry));
+  if (!e) return;
+  e->hash = hash; e->target = target; e->value = value; e->next = h->head; h->head = e;
+  prv_pin(env, target);
+  prv_pin(env, value);
+}
+
+/* Weak references (strong-ref cheat: target pinned alive). */
+static wasm_externref_obj_t prv_weak_ref_create(wasm_exec_env_t env, wasm_obj_t target) {
+  wasm_obj_t *box = (wasm_obj_t *)wasm_runtime_malloc(sizeof(wasm_obj_t));
+  if (!box) return NULL;
+  *box = target;
+  wasm_externref_obj_t ref = wasm_externref_obj_new(env, box);
+  if (!ref) { wasm_runtime_free(box); return NULL; }
+  prv_pin(env, target);
+  return ref;
+}
+static wasm_obj_t prv_weak_ref_get(wasm_exec_env_t env, wasm_externref_obj_t ref) {
+  (void)env;
+  if (!ref) return NULL;
+  wasm_obj_t *box = (wasm_obj_t *)wasm_externref_obj_get_value(ref);
+  return box ? *box : NULL;
+}
+
+/* Math. sin/cos/asin/exp/log are in the firmware libm subset; atan2 + pow are
+   not, so derive them (adequate precision for layout/colors). */
+static double prv_atan_poly(double x) { /* |x| <= 1 minimax-ish */
+  const double a = 0.9998660, b = -0.3302995, c = 0.1801410, d = -0.0851330, e = 0.0208351;
+  double x2 = x * x;
+  return x * (a + x2 * (b + x2 * (c + x2 * (d + x2 * e))));
+}
+static double prv_atan(double x) {
+  const double HALF_PI = 1.5707963267948966;
+  if (x >= 0) return x <= 1 ? prv_atan_poly(x) : HALF_PI - prv_atan_poly(1.0 / x);
+  return x >= -1 ? prv_atan_poly(x) : -HALF_PI - prv_atan_poly(1.0 / x);
+}
+static double prv_atan2(double y, double x) {
+  const double PI = 3.141592653589793, HALF_PI = 1.5707963267948966;
+  if (x > 0) return prv_atan(y / x);
+  if (x < 0) return y >= 0 ? prv_atan(y / x) + PI : prv_atan(y / x) - PI;
+  return y > 0 ? HALF_PI : (y < 0 ? -HALF_PI : 0.0);
+}
+static double prv_pow(double b, double x) {
+  if (b > 0) return exp(x * log(b));
+  if (b == 0) return x == 0 ? 1.0 : 0.0;
+  /* negative base: only integer exponents are real; use |b| and sign parity */
+  double r = exp(x * log(-b));
+  long xi = (long)x;
+  return ((double)xi == x && (xi & 1)) ? -r : r;
+}
+static double prv_math_sin(wasm_exec_env_t e, double x) { (void)e; return sin(x); }
+static double prv_math_cos(wasm_exec_env_t e, double x) { (void)e; return cos(x); }
+static double prv_math_asin(wasm_exec_env_t e, double x) { (void)e; return asin(x); }
+static double prv_math_atan2(wasm_exec_env_t e, double y, double x) { (void)e; return prv_atan2(y, x); }
+static double prv_math_exp(wasm_exec_env_t e, double x) { (void)e; return exp(x); }
+static double prv_math_log(wasm_exec_env_t e, double x) { (void)e; return log(x); }
+static double prv_math_pow(wasm_exec_env_t e, double b, double x) { (void)e; return prv_pow(b, x); }
+
+static wasm_externref_obj_t prv_f64_to_precision(wasm_exec_env_t env, double value, int32_t digits) {
+  char buf[40];
+  snprintf(buf, sizeof buf, "%.*g", (int)(digits < 1 ? 1 : digits), value);
+  return prv_wrap(env, prv_hstr_from_utf8(buf, (uint32_t)strlen(buf)));
 }
 static wasm_externref_obj_t prv_regexp_create(wasm_exec_env_t env, wasm_externref_obj_t s,
                                               int32_t ml, int32_t cs, int32_t uni, int32_t da) {
@@ -589,6 +704,7 @@ typedef struct {
   wasm_func_obj_t cb;
   wasm_obj_t arg;
   int64_t due;
+  uint32_t id; /* nonzero handle for clearSchedule */
 } EvTask;
 /* Sized from measured host peaks for the counter (root_peak=22, micro_peak=1,
    timer_peak=5, task_total=11) with ~20x margin -- MCU SRAM is tight (8192, the
@@ -600,7 +716,7 @@ static EvTask s_micro[EV_MAX];
 static int s_micro_n;
 static EvTask s_timer[EV_MAX];
 static int s_timer_n;
-static int s_timer_marker;
+static uint32_t s_next_timer_id = 1;
 #define EV_ROOT_MAX (2 * EV_MAX)
 static WASMLocalObjectRef s_roots[EV_ROOT_MAX];
 static int s_root_n;
@@ -644,9 +760,31 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
     t->due = delay < 0 ? 0 : delay;
+    t->id = s_next_timer_id++;
     prv_ev_pin(env, t);
+    uint32_t *box = (uint32_t *)wasm_runtime_malloc(sizeof(uint32_t));
+    if (box) {
+      *box = t->id;
+      wasm_externref_obj_t h = wasm_externref_obj_new(env, box);
+      if (h) return h;
+      wasm_runtime_free(box);
+    }
   }
-  return wasm_externref_obj_new(env, &s_timer_marker);
+  return NULL;
+}
+static void prv_clear_schedule(wasm_exec_env_t env, wasm_externref_obj_t handle) {
+  (void)env;
+  if (!handle) return;
+  uint32_t *box = (uint32_t *)wasm_externref_obj_get_value(handle);
+  if (!box) return;
+  uint32_t id = *box;
+  for (int i = 0; i < s_timer_n; i++) {
+    if (s_timer[i].id == id) {
+      memmove(s_timer + i, s_timer + i + 1, (size_t)(s_timer_n - i - 1) * sizeof(EvTask));
+      s_timer_n--;
+      return;
+    }
+  }
 }
 
 /* Drain microtasks then the earliest-due timer until both empty (a static app
@@ -815,6 +953,18 @@ static NativeSymbol s_dart_natives[] = {
     {"tryParseResultGetDouble", prv_try_parse_result_get_double, "(r)F"},
     {"expandoCreate", prv_expando_create, "()r"},
     {"expandoGet", prv_expando_get, "(rrI)r"},
+    {"expandoSet", prv_expando_set, "(rrIr)"},
+    {"weakRefCreate", prv_weak_ref_create, "(r)r"},
+    {"weakRefGet", prv_weak_ref_get, "(r)r"},
+    {"clearSchedule", prv_clear_schedule, "(r)"},
+    {"mathSin", prv_math_sin, "(F)F"},
+    {"mathCos", prv_math_cos, "(F)F"},
+    {"mathAsin", prv_math_asin, "(F)F"},
+    {"mathAtan2", prv_math_atan2, "(FF)F"},
+    {"mathExp", prv_math_exp, "(F)F"},
+    {"mathLog", prv_math_log, "(F)F"},
+    {"mathPow", prv_math_pow, "(FF)F"},
+    {"f64ToPrecision", prv_f64_to_precision, "(Fi)r"},
     {"queueMicrotask", prv_queue_microtask, "(rr)"},
     {"scheduleOnce", prv_schedule_once, "(Irr)r"},
     {"regexpCreateOrFailWithString", prv_regexp_create, "(riiii)r"},
