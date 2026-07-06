@@ -50,30 +50,25 @@ static void prv_root_update(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, &bounds);
 }
 
-//! A button press = a tap at the screen centre. Flutter input semantics: the
-//! press DISPATCHES immediately (Listener -> setState -> count++ ->
-//! scheduleFrame, ~ms, no render) and a coalescing timer renders ONE frame
-//! showing the latest count. So mashing while a render is pending just keeps
-//! bumping the count; the next frame shows the net result (press 3 -> mash ->
-//! 13) instead of replaying a render per press. The immediate dispatch is
-//! cheap, so no button-mash rate can overflow the app event queue (the earlier
-//! synchronous-render handler did, rebooting the privileged app).
-#define COUNTER_RENDER_COALESCE_MS 16
-static bool s_render_pending;
-static AppTimer *s_render_timer;
+//! Flutter's frame model, decoupled from input like a real vsync. A button
+//! press ONLY dispatches (Listener -> setState -> count++ -> scheduleFrame),
+//! which is ~ms and never renders -- so any mash rate just keeps bumping the
+//! count with no queue backlog and no event-loop overflow. A steady ~30fps
+//! timer pumps the event loop: it renders exactly ONE frame if presses
+//! scheduled one since the last tick (showing the net count -- 3 -> mash ->
+//! 13), or does nothing when idle. Renders can never outnumber frame ticks, so
+//! the display always converges to the current count instead of replaying a
+//! render per press.
+#define COUNTER_FRAME_MS 33
+static AppTimer *s_frame_timer;
 
-static void prv_render(void *context) {
-  s_render_timer = NULL;
-  s_render_pending = false;
-  dart_app_pump(); /* one render for every press dispatched since last frame */
+static void prv_frame_tick(void *context) {
+  dart_app_pump(); /* renders iff a frame was scheduled; ~0 when idle */
+  s_frame_timer = app_timer_register(COUNTER_FRAME_MS, prv_frame_tick, NULL);
 }
 
 static void prv_tap(ClickRecognizerRef recognizer, void *context) {
-  dart_app_dispatch_only(100.0, 114.0); /* count++ now; frame deferred */
-  if (!s_render_pending) {
-    s_render_pending = true;
-    s_render_timer = app_timer_register(COUNTER_RENDER_COALESCE_MS, prv_render, NULL);
-  }
+  dart_app_dispatch_only(100.0, 114.0); /* count++ now; the frame tick renders */
 }
 
 static void prv_click_config(void *context) {
@@ -123,7 +118,9 @@ static void prv_start(void *ctx) {
   bool dart_ok = dart_app_start_flutter_counter();
   if (!dart_ok) {
     prv_fail(data, "dart_app_start_flutter_counter failed");
+    return;
   }
+  s_frame_timer = app_timer_register(COUNTER_FRAME_MS, prv_frame_tick, NULL);
 }
 
 static void prv_init(void) {
@@ -148,6 +145,10 @@ static void prv_init(void) {
 
 static void prv_deinit(void) {
   CounterData *data = app_state_get_user_data();
+  if (s_frame_timer) {
+    app_timer_cancel(s_frame_timer);
+    s_frame_timer = NULL;
+  }
   dart_app_stop();
   window_destroy(data->window);
   task_free(data);
