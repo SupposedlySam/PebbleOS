@@ -571,10 +571,16 @@ static int s_regexp_marker;
    cheat: pinned alive for the app's lifetime). Uses the local-obj-ref stack,
    which is a GC root and IS linked (wasm_runtime_pin_object is not). */
 #define DART_PIN_MAX 1024
-static WASMLocalObjectRef s_pins[DART_PIN_MAX];
+/* Pool-allocated (PSRAM), NOT static .bss: obelix SRAM is tight and a large
+   static array here starved the boot-time allocations (v178 crash-looped). */
+static WASMLocalObjectRef *s_pins;
 static int s_pin_n;
 static void prv_pin(wasm_exec_env_t env, wasm_obj_t obj) {
-  if (!obj || s_pin_n >= DART_PIN_MAX) return;
+  if (!obj) return;
+  if (!s_pins) {
+    s_pins = (WASMLocalObjectRef *)wasm_runtime_malloc(DART_PIN_MAX * sizeof(WASMLocalObjectRef));
+  }
+  if (!s_pins || s_pin_n >= DART_PIN_MAX) return;
   wasm_runtime_push_local_obj_ref(env, &s_pins[s_pin_n]);
   s_pins[s_pin_n].val = obj;
   s_pin_n++;
@@ -704,7 +710,6 @@ typedef struct {
   wasm_func_obj_t cb;
   wasm_obj_t arg;
   int64_t due;
-  uint32_t id; /* nonzero handle for clearSchedule */
 } EvTask;
 /* Sized from measured host peaks for the counter (root_peak=22, micro_peak=1,
    timer_peak=5, task_total=11) with ~20x margin -- MCU SRAM is tight (8192, the
@@ -716,7 +721,7 @@ static EvTask s_micro[EV_MAX];
 static int s_micro_n;
 static EvTask s_timer[EV_MAX];
 static int s_timer_n;
-static uint32_t s_next_timer_id = 1;
+static int s_timer_marker;
 #define EV_ROOT_MAX (2 * EV_MAX)
 static WASMLocalObjectRef s_roots[EV_ROOT_MAX];
 static int s_root_n;
@@ -760,31 +765,15 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
     t->due = delay < 0 ? 0 : delay;
-    t->id = s_next_timer_id++;
     prv_ev_pin(env, t);
-    uint32_t *box = (uint32_t *)wasm_runtime_malloc(sizeof(uint32_t));
-    if (box) {
-      *box = t->id;
-      wasm_externref_obj_t h = wasm_externref_obj_new(env, box);
-      if (h) return h;
-      wasm_runtime_free(box);
-    }
   }
-  return NULL;
+  return wasm_externref_obj_new(env, &s_timer_marker);
 }
+/* No-op: the static Material counter never needs to cancel a timer, and
+   tracking cancellable ids would regrow EvTask (SRAM). A timer that "should
+   have" been canceled just fires once harmlessly. */
 static void prv_clear_schedule(wasm_exec_env_t env, wasm_externref_obj_t handle) {
-  (void)env;
-  if (!handle) return;
-  uint32_t *box = (uint32_t *)wasm_externref_obj_get_value(handle);
-  if (!box) return;
-  uint32_t id = *box;
-  for (int i = 0; i < s_timer_n; i++) {
-    if (s_timer[i].id == id) {
-      memmove(s_timer + i, s_timer + i + 1, (size_t)(s_timer_n - i - 1) * sizeof(EvTask));
-      s_timer_n--;
-      return;
-    }
-  }
+  (void)env; (void)handle;
 }
 
 /* Drain microtasks then the earliest-due timer until both empty (a static app
