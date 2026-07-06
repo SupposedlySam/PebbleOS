@@ -516,6 +516,21 @@ bool dart_app_inject_tap(double x, double y) {
   return dart_app_dispatch_taps(1, x, y);
 }
 
+bool dart_app_dispatch_only(double x, double y) {
+  prv_app_lock();
+  task_watchdog_pause(240);
+  bool ok = prv_dispatch_tap_locked(x, y);
+  task_watchdog_resume();
+  prv_app_unlock();
+  return ok;
+}
+
+void dart_app_pump(void) {
+  prv_app_lock();
+  prv_pump_locked();
+  prv_app_unlock();
+}
+
 bool dart_app_is_running(void) {
   return s_app_inst != NULL;
 }

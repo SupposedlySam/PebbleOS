@@ -50,39 +50,29 @@ static void prv_root_update(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, &bounds);
 }
 
-//! A button press = a tap at the screen centre, injected into the Flutter app. The
-//! resulting setState -> scheduleFrame -> render repaints the new count via presentFrame.
-//!
-//! Presses are COALESCED through a pending counter drained one tap per timer
-//! callback: a render takes ~185ms, and injecting synchronously from the click
-//! handler let fast button mashing queue events ~10x faster than they drained --
-//! the app task's event queue overflowed and, because this is a privileged app,
-//! the firmware's Queue-full policy REBOOTED the watch (event_service_handle_event
-//! assert). With the drain rescheduling between taps, the queue empties between
-//! renders and every press still counts.
-static int s_pending_taps;
-static AppTimer *s_tap_drain_timer;
+//! A button press = a tap at the screen centre. Flutter input semantics: the
+//! press DISPATCHES immediately (Listener -> setState -> count++ ->
+//! scheduleFrame, ~ms, no render) and a coalescing timer renders ONE frame
+//! showing the latest count. So mashing while a render is pending just keeps
+//! bumping the count; the next frame shows the net result (press 3 -> mash ->
+//! 13) instead of replaying a render per press. The immediate dispatch is
+//! cheap, so no button-mash rate can overflow the app event queue (the earlier
+//! synchronous-render handler did, rebooting the privileged app).
+#define COUNTER_RENDER_COALESCE_MS 16
+static bool s_render_pending;
+static AppTimer *s_render_timer;
 
-static void prv_tap_drain(void *context) {
-  s_tap_drain_timer = NULL;
-  int batch = s_pending_taps;
-  if (batch <= 0) {
-    return;
-  }
-  s_pending_taps = 0;
-  /* Dispatch the whole burst, render ONCE with the net state (Flutter
-     semantics: presses mutate state immediately; the next frame shows the
-     latest value -- no queued replay of intermediate frames). */
-  dart_app_dispatch_taps(batch, 100.0, 114.0);
-  if (s_pending_taps > 0) { /* presses arrived during the render */
-    s_tap_drain_timer = app_timer_register(1, prv_tap_drain, NULL);
-  }
+static void prv_render(void *context) {
+  s_render_timer = NULL;
+  s_render_pending = false;
+  dart_app_pump(); /* one render for every press dispatched since last frame */
 }
 
 static void prv_tap(ClickRecognizerRef recognizer, void *context) {
-  s_pending_taps++;
-  if (!s_tap_drain_timer) {
-    s_tap_drain_timer = app_timer_register(1, prv_tap_drain, NULL);
+  dart_app_dispatch_only(100.0, 114.0); /* count++ now; frame deferred */
+  if (!s_render_pending) {
+    s_render_pending = true;
+    s_render_timer = app_timer_register(COUNTER_RENDER_COALESCE_MS, prv_render, NULL);
   }
 }
 

@@ -46,6 +46,16 @@ bool dart_app_inject_tap(double x, double y);
 //! semantics for burst input: N presses -> one frame showing the net result.
 bool dart_app_dispatch_taps(int count, double x, double y);
 
+//! Deliver ONE tap's pointer events (Listener handler -> setState ->
+//! scheduleFrame) WITHOUT rendering -- cheap (no build/layout/paint), returns
+//! in ~ms. Pair with dart_app_pump() on a coalescing timer: N rapid presses
+//! each dispatch instantly (count keeps climbing) and one deferred pump renders
+//! the latest value, exactly like Flutter (press 3 -> mash -> next frame 13).
+bool dart_app_dispatch_only(double x, double y);
+
+//! Render any frame the dispatches scheduled (drains the event loop once).
+void dart_app_pump(void);
+
 //! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
 void dart_app_stop(void);
 
