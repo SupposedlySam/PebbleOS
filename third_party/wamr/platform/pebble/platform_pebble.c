@@ -31,16 +31,6 @@ wamr_pebble_bind_exec_env_to_current_task(void *exec_env)
     wasm_exec_env_set_thread_info((WASMExecEnv *)exec_env);
 }
 
-const uint32_t *
-wamr_pebble_array_u32_data(void *array_obj)
-{
-    WASMArrayObjectRef arr = (WASMArrayObjectRef)array_obj;
-    if (!arr || wasm_array_obj_elem_size_log(arr) != 2) {
-        return NULL;
-    }
-    return (const uint32_t *)wasm_array_obj_first_elem_addr(arr);
-}
-
 /* DIAG (throwaway, INV2): GC phase trace + force-GC (see wamr_pebble_glue.h). */
 #include "../../wasm-micro-runtime/core/shared/mem-alloc/ems/ems_gc.h"
 static void (*s_gc_trace_cb)(const char *phase);

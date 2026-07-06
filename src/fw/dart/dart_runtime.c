@@ -39,11 +39,9 @@
 #include <string.h>
 
 /* The WasmGC objects live in the GC heap (init_args.gc_heap_size); the
-   instantiate heap is the wasm linear memory + module malloc. These, plus the
-   writable module copy, currently draw from the kernel heap (SRAM) and so do
-   NOT fit SRAM-only boards (Emery/QEMU): a real module needs the PSRAM pool
-   (Alloc_With_Pool over the ~8 MB PSRAM on obelix). Validated on QEMU: the
-   runtime initializes and dispatches; allocation is the gate. */
+   instantiate heap is the wasm linear memory + module malloc. On obelix these
+   draw from the 8MB PSRAM pool (see dart_runtime_pool below -- the production
+   path); the SRAM kernel-heap fallback only fits the no-GC smoke test. */
 #ifndef DART_GC_HEAP_SIZE
 /* Allocated per-instance at instantiate even for non-GC modules. On real obelix
    the SRAM kernel heap is tighter than the emulator, and 32 KB here made
@@ -372,9 +370,19 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
      Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
      the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
   task_watchdog_pause(240);
+  s_init_ms = s_load_ms = s_inst_ms = s_main_ms = s_frame_ms = 0;
   uint32_t t_start_ms = (uint32_t)bh_get_tick_ms();
   /* Phase timing (PBL_LOG lines carry timestamps; grep "dart phase"). */
   PBL_LOG_ALWAYS("dart phase: load start");
+  if (wasm_buf == NULL && !s_app_module) {
+    /* NULL means "use the cache" (dart_app_start_flutter_counter checks first),
+       but a concurrent failure may have unloaded it between that check and this
+       lock -- fail explicitly rather than handing WAMR a NULL buffer. */
+    strncpy(s_module_fail, "no cached module", sizeof(s_module_fail) - 1);
+    task_watchdog_resume();
+    prv_app_unlock();
+    return false;
+  }
   if (s_app_module && wasm_buf == NULL) {
     /* Warm cache: the module survived the previous stop; skip load+validate. */
     PBL_LOG_ALWAYS("dart phase: load SKIPPED (cached module)");
@@ -571,7 +579,9 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
 bool dart_app_start_flutter_counter(void) {
   if (prv_app_has_cached_module()) {
     /* Warm cache: reuse the parsed module; skips the resource read AND WAMR
-       load/validate of the 1.18MB module. */
+       load/validate. Benign check-then-act gap: if a concurrent failure
+       unloads the cache before dart_app_start re-locks, it fails cleanly
+       with "no cached module" (guarded inside the lock). */
     return dart_app_start(NULL, 0);
   }
   uint32_t size = 0;
@@ -628,7 +638,7 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d init_ms=%u (ld=%u in=%u mn=%u fr=%u) tap_ms=%u fail=%s",
+      "dart: running=%s frames=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
       (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,

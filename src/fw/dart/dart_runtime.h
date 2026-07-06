@@ -25,8 +25,12 @@ bool dart_run_test_module(void);
 //! Start a resident Flutter app from a dart2wasm --standalone module: load,
 //! instantiate, run main(), and drain the event loop so the first frame renders
 //! (via the presentFrame native). The instance stays alive for input injection.
-//! Takes ownership of wasm_buf (a WAMR-pool RAM buffer, e.g. from PFS): WAMR
-//! rewrites it in place and dart_app_stop frees it. Freed too on failure.
+//! Takes ownership of wasm_buf (a WAMR-pool RAM buffer): WAMR rewrites it in
+//! place. The parsed module + buffer survive dart_app_stop as a warm cache
+//! (relaunches skip load+validate); they are freed only on failure or when a
+//! new buffer replaces them. wasm_buf == NULL relaunches FROM that cache and
+//! fails ("no cached module") if none exists -- callers should check first
+//! (see dart_app_start_flutter_counter).
 //! @return true if main() ran and the first frame was pumped without trapping.
 bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size);
 

@@ -8,7 +8,6 @@
 #include "dart_embedder.h"
 
 #include "console/dbgserial.h"
-#include "kernel/pbl_malloc.h"
 #include "system/logging.h"
 
 #include "applib/app.h"
@@ -37,12 +36,13 @@ typedef struct {
   int is_buffer;
 } HStr;
 
-/* HStr storage draws from the WAMR pool (8MB PSRAM), NOT the SRAM kernel
-   heap: HStrs are freed only when the wasm GC runs their finalizers, and the
-   low-garbage render pipeline can defer GC for many frames -- long enough for
-   per-frame strings to exhaust the small kernel heap (the count~8/19 "safely
-   rebooted due to OOM"). The pool has three orders of magnitude more headroom
-   and the GC's own heap lives there anyway. */
+/* ALL host-string allocations in this section (headers here, data buffers via
+   wasm_runtime_malloc directly) draw from the WAMR pool (8MB PSRAM), NOT the
+   SRAM kernel heap: HStrs are freed only when the wasm GC runs their
+   finalizers, and the low-garbage render pipeline can defer GC for many frames
+   -- long enough for per-frame strings to exhaust the small kernel heap (the
+   count~8/19 "safely rebooted due to OOM"). The pool has three orders of
+   magnitude more headroom and the GC's own heap lives there anyway. */
 static void *prv_hstr_alloc(uint32_t size) {
   void *p = wasm_runtime_malloc(size);
   if (p) memset(p, 0, size);
@@ -68,20 +68,18 @@ static void prv_hstr_push(HStr *b, uint16_t u) {
   if (b->length == b->capacity) {
     uint16_t *grown =
         (uint16_t *)wasm_runtime_malloc(b->capacity * 2 * sizeof(uint16_t));
-    if (grown) {
-      memcpy(grown, b->data, b->length * sizeof(uint16_t));
-      wasm_runtime_free(b->data);
-    }
     if (!grown) {
       return; /* OOM: drop the unit rather than deref NULL; string truncates */
     }
+    memcpy(grown, b->data, b->length * sizeof(uint16_t));
+    wasm_runtime_free(b->data);
     b->data = grown;
     b->capacity *= 2;
   }
   b->data[b->length++] = u;
 }
 
-/* UTF-16 -> UTF-8 into a kernel-malloc'd NUL-terminated buffer (caller frees). */
+/* UTF-16 -> UTF-8 into a pool-allocated NUL-terminated buffer (caller frees). */
 static char *prv_hstr_to_utf8(const HStr *s) {
   char *out = (char *)wasm_runtime_malloc(s->length * 3 + 1);
   uint32_t i, o = 0;
@@ -151,7 +149,7 @@ static HStr *prv_hstr_from_utf8(const char *s, uint32_t len) {
 }
 
 /* Free the host HStr (or a single malloc'd payload) when its externref wrapper
-   is GC-collected. Without this every string op leaks MCU RAM (host-side payload
+   is GC-collected. Without this every string op leaks pool RAM (host-side payload
    behind the externref is not GC-managed). */
 static void prv_hstr_finalizer(const wasm_obj_t obj, void *data) {
   HStr *s = (HStr *)data;
@@ -171,6 +169,10 @@ static wasm_externref_obj_t prv_wrap(wasm_exec_env_t env, HStr *s) {
   wasm_externref_obj_t ref = wasm_externref_obj_new(env, s);
   if (ref && s) {
     wasm_obj_set_gc_finalizer(env, (wasm_obj_t)ref, prv_hstr_finalizer, s);
+  } else if (s) {
+    /* No wrapper means no finalizer will ever run; free the host side now. */
+    wasm_runtime_free(s->data);
+    wasm_runtime_free(s);
   }
   return ref;
 }
@@ -306,6 +308,9 @@ static wasm_externref_obj_t prv_json_encode_string(wasm_exec_env_t env,
     return NULL;
   }
   r = prv_hstr_new(0);
+  if (!r) {
+    return NULL;
+  }
   prv_hstr_push(r, '"');
   for (i = 0; i < s->length; i++) {
     prv_hstr_push(r, s->data[i]);
@@ -706,13 +711,14 @@ void dart_embedder_reset_frame(void) {
   }
 }
 
-/* Blit a rasterized ARGB8888 frame ([argb], row-major [w]x[h]) into the APP
-   framebuffer, downconverting each pixel to the panel's GColor8, then request a
-   normal app render. The compositor composites the app framebuffer to the panel every
-   cycle (the same path every app uses), so the frame persists. We deliberately do NOT
-   write the system framebuffer or freeze the compositor: doing that fought the OS from
-   a non-foreground context and the frame never stuck (the watchface owned the screen).
-   Clamps to the framebuffer bounds if the source size differs. */
+/* Blit a GColor8 frame ([pixels], 1 byte/px row-major [w]x[h] -- the dartui
+   rasterizer works in the panel format) into the APP framebuffer with straight
+   row copies, then request a normal app render. The compositor composites the
+   app framebuffer to the panel every cycle (the same path every app uses), so
+   the frame persists. We deliberately do NOT write the system framebuffer or
+   freeze the compositor: doing that fought the OS from a non-foreground context
+   and the frame never stuck (the watchface owned the screen). Clamps to the
+   framebuffer bounds if the source size differs. */
 static void prv_present_frame(wasm_exec_env_t env, wasm_array_obj_t pixels,
                               int32_t w, int32_t h) {
   GBitmap bmp = compositor_get_app_framebuffer_as_bitmap();
