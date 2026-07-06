@@ -55,7 +55,7 @@
    not SRAM -- so the full dart2wasm module gets a generous GC heap for its constant object
    graph + instance state (8KB above is only enough for the no-GC smoke test). */
 #ifndef DART_GC_HEAP_SIZE_POOL
-#define DART_GC_HEAP_SIZE_POOL (2 * 1024 * 1024)  /* 2MB from the 8MB PSRAM pool (WAMR default is 128KB) */
+#define DART_GC_HEAP_SIZE_POOL (3 * 1024 * 1024)  /* 3MB from the PSRAM pool (Material needs a bigger GC heap) */
 #endif
 /* Minimum probed-usable PSRAM to bother routing the pool through it: the full module needs
    the 67KB writable copy + GC heap + linear memory (~194KB). Below this, fall back to the
@@ -106,10 +106,11 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
     // Fixed 8MB window rather than sf32lb52_psram_size(): that probe's
     // whole-cache CleanInvalidate round-trip reports 0KB even though normal
     // cached access is fine (long since proven by every module run).
-    // 8MB of the 16MB PSRAM: the Flutter counter needs ~5.5MB (1.18MB module
-    // copy + WAMR load structures + 1MB GC heap + 1MB operand stack + linear
-    // memory). 2MB was too small ("allocate memory failed" during load).
-    *size = 8u * 1024u * 1024u;
+    // 13MB of the 16MB PSRAM. The minimal counter needs ~5.5MB, but the stock
+    // Material app is a 2.37MB module + a bigger GC object graph -- 8MB failed
+    // instantiate ("allocate memory failed"). 13MB leaves headroom for the
+    // module copy + 3MB GC heap + 1MB operand stack + linear memory.
+    *size = 13u * 1024u * 1024u;
     return true;
   }
 #endif
