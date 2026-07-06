@@ -41,6 +41,16 @@ wamr_pebble_array_u32_data(void *array_obj)
     return (const uint32_t *)wasm_array_obj_first_elem_addr(arr);
 }
 
+const uint8_t *
+wamr_pebble_array_u8_data(void *array_obj)
+{
+    WASMArrayObjectRef arr = (WASMArrayObjectRef)array_obj;
+    if (!arr || wasm_array_obj_elem_size_log(arr) != 0) {
+        return NULL;
+    }
+    return (const uint8_t *)wasm_array_obj_first_elem_addr(arr);
+}
+
 /* ---- lifecycle ---- */
 
 int

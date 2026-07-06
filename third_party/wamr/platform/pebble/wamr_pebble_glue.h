@@ -26,3 +26,8 @@ void wamr_pebble_bind_exec_env_to_current_task(void *exec_env);
 //! across any call that can run wasm or GC.
 //! @param array_obj a wasm_array_obj_t.
 const uint32_t *wamr_pebble_array_u32_data(void *array_obj);
+
+//! Raw element storage of a wasm GC array whose elements are 1 byte wide, or
+//! NULL for any other element size. Same lifetime rules as
+//! wamr_pebble_array_u32_data. @param array_obj a wasm_array_obj_t.
+const uint8_t *wamr_pebble_array_u8_data(void *array_obj);

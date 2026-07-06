@@ -306,7 +306,10 @@ static void prv_app_lock(void) {
 }
 static void prv_app_unlock(void) { mutex_unlock(s_app_mutex); }
 
-//! Tear down the resident app. Caller must hold s_app_mutex.
+//! Tear down the resident app INSTANCE. The parsed module + its buffer are
+//! deliberately kept (a warm cache in PSRAM): load+validate of the 1.18MB
+//! module is a large share of launch time, and reusing the parsed module lets
+//! every launch after the first skip it. Caller must hold s_app_mutex.
 static void prv_app_stop_locked(void) {
   // Drop the frame-presented flag so the next app launch shows its loading screen until
   // Flutter paints again. (present-frame renders through the normal app-framebuffer
@@ -314,9 +317,14 @@ static void prv_app_stop_locked(void) {
   dart_embedder_reset_frame();
   if (s_app_exec_env) { wasm_runtime_destroy_exec_env(s_app_exec_env); s_app_exec_env = NULL; }
   if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
+  s_app_inject_tap = NULL;
+}
+
+//! Drop the cached parsed module too (full teardown; e.g. before loading a
+//! DIFFERENT module). Caller must hold s_app_mutex.
+static void prv_app_unload_module_locked(void) {
   if (s_app_module) { wasm_runtime_unload(s_app_module); s_app_module = NULL; }
   if (s_app_buf) { wasm_runtime_free(s_app_buf); s_app_buf = NULL; }
-  s_app_inject_tap = NULL;
 }
 
 void dart_app_stop(void) {
@@ -333,25 +341,34 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     prv_app_stop_locked(); /* one resident app at a time */
   }
   if (!dart_runtime_init()) {
-    wasm_runtime_free(wasm_buf);
+    if (wasm_buf) wasm_runtime_free(wasm_buf);
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     prv_app_unlock();
     return false;
   }
-  /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
-     rewrites the load buffer in place; dart_app_stop frees it. */
-  s_app_buf = wasm_buf;
   /* The 1.18MB load + instantiate + runApp + first frame run synchronously on the
      interpreter for many seconds -- far longer than the 500ms task-watchdog window
      -- so this (KernelBG) task can't check in and the watchdog reboots us mid-init.
      Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
      the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
   task_watchdog_pause(240);
-  s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
-  if (!s_app_module) {
-    snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
-    goto fail;
+  /* Phase timing (PBL_LOG lines carry timestamps; grep "dart phase"). */
+  PBL_LOG_ALWAYS("dart phase: load start");
+  if (s_app_module && wasm_buf == NULL) {
+    /* Warm cache: the module survived the previous stop; skip load+validate. */
+    PBL_LOG_ALWAYS("dart phase: load SKIPPED (cached module)");
+  } else {
+    prv_app_unload_module_locked(); /* replace any cached module */
+    /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
+       rewrites the load buffer in place; kept until the module is unloaded. */
+    s_app_buf = wasm_buf;
+    s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
+    if (!s_app_module) {
+      snprintf(s_module_fail, sizeof(s_module_fail), "load: %.70s", error_buf);
+      goto fail;
+    }
   }
+  PBL_LOG_ALWAYS("dart phase: instantiate start");
   s_app_inst = wasm_runtime_instantiate(s_app_module, DART_FLUTTER_STACK_SIZE,
                                         DART_FLUTTER_HEAP_SIZE, error_buf, sizeof(error_buf));
   if (!s_app_inst) {
@@ -363,13 +380,16 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
   }
+  PBL_LOG_ALWAYS("dart phase: main start");
   if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
     snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
              wasm_runtime_get_exception(s_app_inst));
     goto fail;
   }
+  PBL_LOG_ALWAYS("dart phase: evloop start");
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  PBL_LOG_ALWAYS("dart phase: first frame done");
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
 
   /* Diagnose why the first frame didn't render (most common: GC OOM in render()
@@ -395,6 +415,7 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
 fail:
   task_watchdog_resume(); /* re-arm before bailing (pause was active past the load) */
   prv_app_stop_locked();
+  prv_app_unload_module_locked(); /* a half-initialized module is not a valid cache */
   prv_app_unlock();
   return false;
 }
