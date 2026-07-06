@@ -84,6 +84,10 @@ static bool s_initialized = false;
    badly (polling said 12s/tap when the render is far faster). */
 static uint32_t s_init_ms;
 static uint32_t s_last_tap_ms;
+/* Init phase split (ms): load+validate, instantiate, $invokeMain (Dart main +
+   runApp), first-frame event-loop drain. The PBL_LOG phase lines are
+   dictionary-hashed in log dumps, so ticks land here instead. */
+static uint32_t s_load_ms, s_inst_ms, s_main_ms, s_frame_ms;
 /* Millisecond tick from the WAMR platform layer (FreeRTOS tick underneath). */
 extern uint64_t bh_get_tick_ms(void);
 
@@ -385,6 +389,8 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
       goto fail;
     }
   }
+  s_load_ms = (uint32_t)bh_get_tick_ms() - t_start_ms;
+  uint32_t t_inst_ms = (uint32_t)bh_get_tick_ms();
   PBL_LOG_ALWAYS("dart phase: instantiate start");
   s_app_inst = wasm_runtime_instantiate(s_app_module, DART_FLUTTER_STACK_SIZE,
                                         DART_FLUTTER_HEAP_SIZE, error_buf, sizeof(error_buf));
@@ -397,15 +403,20 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
   }
+  s_inst_ms = (uint32_t)bh_get_tick_ms() - t_inst_ms;
+  uint32_t t_main_ms = (uint32_t)bh_get_tick_ms();
   PBL_LOG_ALWAYS("dart phase: main start");
   if (!prv_call_invoke_main(s_app_module, s_app_inst, s_app_exec_env)) {
     snprintf(s_module_fail, sizeof(s_module_fail), "main: %.70s",
              wasm_runtime_get_exception(s_app_inst));
     goto fail;
   }
+  s_main_ms = (uint32_t)bh_get_tick_ms() - t_main_ms;
+  uint32_t t_frame_ms = (uint32_t)bh_get_tick_ms();
   PBL_LOG_ALWAYS("dart phase: evloop start");
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  s_frame_ms = (uint32_t)bh_get_tick_ms() - t_frame_ms;
   PBL_LOG_ALWAYS("dart phase: first frame done");
   s_init_ms = (uint32_t)bh_get_tick_ms() - t_start_ms;
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
@@ -617,10 +628,12 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d init_ms=%u tap_ms=%u fail=%s",
+      "dart: running=%s frames=%d init_ms=%u (ld=%u in=%u mn=%u fr=%u) tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
-      (unsigned)s_init_ms, (unsigned)s_last_tap_ms,
+      (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,
+      (unsigned)s_main_ms, (unsigned)s_frame_ms,
+      (unsigned)s_last_tap_ms,
       s_module_fail[0] ? s_module_fail : "(none)");
 }
 
