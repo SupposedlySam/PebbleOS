@@ -56,7 +56,7 @@
    not SRAM -- so the full dart2wasm module gets a generous GC heap for its constant object
    graph + instance state (8KB above is only enough for the no-GC smoke test). */
 #ifndef DART_GC_HEAP_SIZE_POOL
-#define DART_GC_HEAP_SIZE_POOL (1 * 1024 * 1024)  /* 1MB from the PSRAM pool (WAMR default is 128KB) */
+#define DART_GC_HEAP_SIZE_POOL (2 * 1024 * 1024)  /* 2MB from the 8MB PSRAM pool (WAMR default is 128KB) */
 #endif
 /* Minimum probed-usable PSRAM to bother routing the pool through it: the full module needs
    the 67KB writable copy + GC heap + linear memory (~194KB). Below this, fall back to the
@@ -320,6 +320,14 @@ static void prv_app_stop_locked(void) {
   s_app_inject_tap = NULL;
 }
 
+//! True when a parsed module survives from a previous run (warm cache).
+static bool prv_app_has_cached_module(void) {
+  prv_app_lock();
+  bool cached = s_app_module != NULL;
+  prv_app_unlock();
+  return cached;
+}
+
 //! Drop the cached parsed module too (full teardown; e.g. before loading a
 //! DIFFERENT module). Caller must hold s_app_mutex.
 static void prv_app_unload_module_locked(void) {
@@ -538,6 +546,11 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
 //! dart_runtime_init takes the PSRAM pool. Shared by the console command and the
 //! Counter system app. @return true if it started + pumped the first frame.
 bool dart_app_start_flutter_counter(void) {
+  if (prv_app_has_cached_module()) {
+    /* Warm cache: reuse the parsed module; skips the resource read AND WAMR
+       load/validate of the 1.18MB module. */
+    return dart_app_start(NULL, 0);
+  }
   uint32_t size = 0;
   uint8_t *mod = prv_load_flutter_module(&size);
   if (!mod) {
