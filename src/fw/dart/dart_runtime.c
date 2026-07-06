@@ -578,6 +578,28 @@ void command_dart_tap(void) {
                            ok ? "OK (re-rendered)" : "FAILED (no app running?)");
 }
 
+//! DIAG (throwaway, INV2): `dart gc` -- force a collection with live phase
+//! markers over the BLE console, to pin WHERE the first-major-GC crash dies
+//! (the count-8 watch reboot). Runs on KernelBG (console), same task the
+//! crash reproduces on via dart tap.
+static void prv_gc_trace(const char *phase) {
+  char buf[64];
+  prompt_send_response_fmt(buf, sizeof(buf), "gc: %s", phase);
+}
+void command_dart_gc(void) {
+  prv_app_lock();
+  if (!s_app_inst) {
+    prompt_send_response("gc: no app running");
+    prv_app_unlock();
+    return;
+  }
+  wamr_pebble_set_gc_trace_cb(prv_gc_trace);
+  bool ok = wamr_pebble_force_gc(s_app_inst);
+  wamr_pebble_set_gc_trace_cb(NULL);
+  prompt_send_response(ok ? "gc: done OK" : "gc: FAILED");
+  prv_app_unlock();
+}
+
 //! `dart status`: report resident-app state + last-failure reason over the BLE console.
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {

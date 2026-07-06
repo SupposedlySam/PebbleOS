@@ -31,3 +31,11 @@ const uint32_t *wamr_pebble_array_u32_data(void *array_obj);
 //! NULL for any other element size. Same lifetime rules as
 //! wamr_pebble_array_u32_data. @param array_obj a wasm_array_obj_t.
 const uint8_t *wamr_pebble_array_u8_data(void *array_obj);
+
+//! DIAG (throwaway, INV2): GC crash hunt. Register a callback that receives a
+//! short phase name at each GC phase boundary (rootset/mark/sweep), and force
+//! an immediate collection of a module instance's GC heap. Remove when the
+//! count-8 crash is closed.
+void wamr_pebble_set_gc_trace_cb(void (*cb)(const char *phase));
+bool wamr_pebble_force_gc(void *module_inst);
+

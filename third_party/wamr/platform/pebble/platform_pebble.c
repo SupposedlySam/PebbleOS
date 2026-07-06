@@ -41,6 +41,29 @@ wamr_pebble_array_u32_data(void *array_obj)
     return (const uint32_t *)wasm_array_obj_first_elem_addr(arr);
 }
 
+/* DIAG (throwaway, INV2): GC phase trace + force-GC (see wamr_pebble_glue.h). */
+#include "../../wasm-micro-runtime/core/shared/mem-alloc/ems/ems_gc.h"
+static void (*s_gc_trace_cb)(const char *phase);
+void
+wamr_pebble_set_gc_trace_cb(void (*cb)(const char *phase))
+{
+    s_gc_trace_cb = cb;
+}
+void
+wamr_pebble_gc_trace(const char *phase) /* strong override of the ems weak hook */
+{
+    if (s_gc_trace_cb)
+        s_gc_trace_cb(phase);
+}
+bool
+wamr_pebble_force_gc(void *module_inst)
+{
+    WASMModuleInstance *mi = (WASMModuleInstance *)module_inst;
+    if (!mi || !mi->e || !mi->e->common.gc_heap_handle)
+        return false;
+    return gci_gc_heap(mi->e->common.gc_heap_handle) == GC_SUCCESS;
+}
+
 const uint8_t *
 wamr_pebble_array_u8_data(void *array_obj)
 {
