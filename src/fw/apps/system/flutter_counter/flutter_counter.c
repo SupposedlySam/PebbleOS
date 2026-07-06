@@ -52,8 +52,34 @@ static void prv_root_update(Layer *layer, GContext *ctx) {
 
 //! A button press = a tap at the screen centre, injected into the Flutter app. The
 //! resulting setState -> scheduleFrame -> render repaints the new count via presentFrame.
-static void prv_tap(ClickRecognizerRef recognizer, void *context) {
+//!
+//! Presses are COALESCED through a pending counter drained one tap per timer
+//! callback: a render takes ~185ms, and injecting synchronously from the click
+//! handler let fast button mashing queue events ~10x faster than they drained --
+//! the app task's event queue overflowed and, because this is a privileged app,
+//! the firmware's Queue-full policy REBOOTED the watch (event_service_handle_event
+//! assert). With the drain rescheduling between taps, the queue empties between
+//! renders and every press still counts.
+static int s_pending_taps;
+static AppTimer *s_tap_drain_timer;
+
+static void prv_tap_drain(void *context) {
+  s_tap_drain_timer = NULL;
+  if (s_pending_taps <= 0) {
+    return;
+  }
+  s_pending_taps--;
   dart_app_inject_tap(100.0, 114.0);
+  if (s_pending_taps > 0) {
+    s_tap_drain_timer = app_timer_register(1, prv_tap_drain, NULL);
+  }
+}
+
+static void prv_tap(ClickRecognizerRef recognizer, void *context) {
+  s_pending_taps++;
+  if (!s_tap_drain_timer) {
+    s_tap_drain_timer = app_timer_register(1, prv_tap_drain, NULL);
+  }
 }
 
 static void prv_click_config(void *context) {
