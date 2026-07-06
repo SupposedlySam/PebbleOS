@@ -79,6 +79,14 @@
 
 static bool s_initialized = false;
 
+/* Hardware-truth timings (ms), reported by dart status: BLE-side measurements
+   stack console round-trip latency on top of the real work and overstate it
+   badly (polling said 12s/tap when the render is far faster). */
+static uint32_t s_init_ms;
+static uint32_t s_last_tap_ms;
+/* Millisecond tick from the WAMR platform layer (FreeRTOS tick underneath). */
+extern uint64_t bh_get_tick_ms(void);
+
 /* WASM memory source. A real dart2wasm module needs far more than the SRAM
    kernel heap can give (the Flutter module needs ~5.5 MB). On obelix the
    production source is a pool over PSRAM @0x60000000 (Alloc_With_Pool),
@@ -360,6 +368,7 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
      Pause it for the duration (the PebbleOS pattern for known-long ops, e.g. flashing);
      the 240s cap still reboots a TRUE hang. Resumed at every exit below. */
   task_watchdog_pause(240);
+  uint32_t t_start_ms = (uint32_t)bh_get_tick_ms();
   /* Phase timing (PBL_LOG lines carry timestamps; grep "dart phase"). */
   PBL_LOG_ALWAYS("dart phase: load start");
   if (s_app_module && wasm_buf == NULL) {
@@ -398,6 +407,7 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   /* Drain runApp's queued warm-up frame -> first render (presentFrame). */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
   PBL_LOG_ALWAYS("dart phase: first frame done");
+  s_init_ms = (uint32_t)bh_get_tick_ms() - t_start_ms;
   task_watchdog_resume(); /* heavy init done -- re-arm the watchdog */
 
   /* Diagnose why the first frame didn't render (most common: GC OOM in render()
@@ -445,6 +455,7 @@ bool dart_app_inject_tap(double x, double y) {
   /* tap -> setState -> scheduleFrame -> build/layout/paint is also heavy on the
      interpreter; pause the watchdog around it (see dart_app_start). */
   task_watchdog_pause(240);
+  uint32_t t_tap_ms = (uint32_t)bh_get_tick_ms();
   if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_tap, 4, argv)) {
     task_watchdog_resume();
     PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
@@ -453,6 +464,7 @@ bool dart_app_inject_tap(double x, double y) {
   }
   /* tap -> setState -> scheduleFrame queued a frame; drain it -> re-render. */
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
+  s_last_tap_ms = (uint32_t)bh_get_tick_ms() - t_tap_ms;
   task_watchdog_resume();
   prv_app_unlock();
   return true;
@@ -605,9 +617,10 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d fail=%s",
+      "dart: running=%s frames=%d init_ms=%u tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
+      (unsigned)s_init_ms, (unsigned)s_last_tap_ms,
       s_module_fail[0] ? s_module_fail : "(none)");
 }
 
