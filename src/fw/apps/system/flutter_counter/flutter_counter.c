@@ -15,6 +15,7 @@
 #include "applib/graphics/graphics.h"
 #include "applib/ui/app_window_stack.h"
 #include "applib/ui/layer.h"
+#include "applib/touch_service.h"
 #include "applib/ui/window.h"
 #include "drivers/button_id.h"
 #include "kernel/pbl_malloc.h"
@@ -71,6 +72,15 @@ static void prv_tap(ClickRecognizerRef recognizer, void *context) {
   dart_app_dispatch_only(100.0, 114.0); /* count++ now; the frame tick renders */
 }
 
+//! Real touchscreen input: forward each touchdown to Flutter at the actual
+//! panel coordinate, so hit-testing works (tap the FAB, not just anywhere).
+//! Rendering stays with the frame tick, same as button input.
+static void prv_touch(const TouchEvent *event, void *context) {
+  if (event->type == TouchEvent_Touchdown) {
+    dart_app_dispatch_only((double)event->x, (double)event->y);
+  }
+}
+
 static void prv_click_config(void *context) {
   window_single_click_subscribe(BUTTON_ID_UP, prv_tap);
   window_single_click_subscribe(BUTTON_ID_SELECT, prv_tap);
@@ -120,6 +130,7 @@ static void prv_start(void *ctx) {
     prv_fail(data, "dart_app_start_flutter_counter failed");
     return;
   }
+  touch_service_subscribe(prv_touch, NULL);
   s_frame_timer = app_timer_register(COUNTER_FRAME_MS, prv_frame_tick, NULL);
 }
 
@@ -145,6 +156,7 @@ static void prv_init(void) {
 
 static void prv_deinit(void) {
   CounterData *data = app_state_get_user_data();
+  touch_service_unsubscribe();
   if (s_frame_timer) {
     app_timer_cancel(s_frame_timer);
     s_frame_timer = NULL;
