@@ -18,6 +18,9 @@
 #include "console/dbgserial.h"
 #include "console/prompt.h"
 #include "drivers/task_watchdog.h"
+
+#include "FreeRTOS.h"
+#include "task.h"
 #include "kernel/event_loop.h"
 #include "kernel/kernel_heap.h"
 #include "kernel/pbl_malloc.h"
@@ -491,14 +494,27 @@ static bool prv_dispatch_tap_locked(double x, double y) {
 
 //! Drain the event loop (renders any frame the dispatches scheduled). Caller
 //! must hold s_app_mutex.
+//!
+//! The render can run for SECONDS in the interpreter, and the app task
+//! (idle+2) outranks KernelBG (idle+1) -- so a long render starves KernelBG,
+//! and when KernelBG has queued work (e.g. the touch IRQ drain that triggered
+//! this very render), its unfed task-watchdog bit NMIs the watch. Coredump-
+//! verified: App <Counter> mid-GC, watchdog bits=0x1 mask=0x183. Dropping to
+//! KernelBG's priority for the render lets FreeRTOS time-slice the two, so
+//! background work (and its watchdog feed) keeps flowing; the pause(240)
+//! covers OUR task's bit, not theirs.
 static void prv_pump_locked(void) {
   if (!s_app_exec_env) {
     return;
   }
   task_watchdog_pause(240);
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  UBaseType_t prio = uxTaskPriorityGet(self);
+  vTaskPrioritySet(self, tskIDLE_PRIORITY + 1);
   uint32_t t_ms = (uint32_t)bh_get_tick_ms();
   dart_embedder_run_event_loop(s_app_exec_env, s_app_inst);
   s_last_tap_ms = (uint32_t)bh_get_tick_ms() - t_ms;
+  vTaskPrioritySet(self, prio);
   task_watchdog_resume();
 }
 
