@@ -20,6 +20,10 @@ typedef enum TouchGesture {
 
 void touch_init(void);
 
+//! Console diagnostics: raw-event count, last event coords, subscriber count,
+//! global-enable flag.
+void touch_diag_get(uint32_t *count, int16_t *x, int16_t *y, uint8_t *subs, bool *enabled);
+
 //! Enable or disable the kernel's touch subscription used for the touch backlight feature.
 //! When disabled, the touch sensor is only active if apps have subscribed to touch events.
 void touch_set_backlight_enabled(bool enabled);

@@ -24,6 +24,10 @@ static int16_t s_last_y;
 
 static PebbleMutex *s_touch_mutex;
 
+// Diagnostics for the `touch status` console command.
+static uint32_t s_diag_event_count;
+static int16_t s_diag_last_x = -1, s_diag_last_y = -1;
+
 static uint8_t s_subscriber_count = 0;
 static bool s_backlight_subscribed = false;
 static bool s_globally_enabled = true;
@@ -98,6 +102,14 @@ bool touch_service_is_globally_enabled(void) {
   return enabled;
 }
 
+void touch_diag_get(uint32_t *count, int16_t *x, int16_t *y, uint8_t *subs, bool *enabled) {
+  *count = s_diag_event_count;
+  *x = s_diag_last_x;
+  *y = s_diag_last_y;
+  *subs = s_subscriber_count;
+  *enabled = s_globally_enabled;
+}
+
 DEFINE_SYSCALL(bool, sys_touch_service_is_enabled, void) {
   return touch_service_is_globally_enabled();
 }
@@ -123,6 +135,9 @@ void touch_set_backlight_enabled(bool enabled) {
 }
 
 static void prv_put_touch_event(TouchEventType type, int16_t x, int16_t y) {
+  s_diag_event_count++;
+  s_diag_last_x = x;
+  s_diag_last_y = y;
   PebbleEvent e = {
     .type = PEBBLE_TOUCH_EVENT,
     .touch = {

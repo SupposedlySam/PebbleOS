@@ -24,6 +24,7 @@
 #include "os/mutex.h"
 #include "wamr_pebble_glue.h"
 #include "pbl/services/system_task.h"
+#include "pbl/services/touch/touch.h"
 #include "process_management/app_manager.h"
 #include "system/logging.h"
 #include "util/heap.h"
@@ -37,6 +38,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The WasmGC objects live in the GC heap (init_args.gc_heap_size); the
@@ -683,6 +685,23 @@ void command_dart_flutter(void) {
 
 //! `dart tap`: inject a tap at the screen center into the resident app -> the
 //! counter increments and re-renders. Mirrors a physical button/touch press.
+void command_dart_tapat(const char *x_str, const char *y_str) {
+  char buf[160];
+  int x = atoi(x_str), y = atoi(y_str);
+  bool ok = dart_app_dispatch_only((double)x, (double)y);
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: tapat (%d,%d) %s", x, y,
+                           ok ? "dispatched" : "FAILED (no app running?)");
+}
+
+void command_touch_status(void) {
+  char buf[160];
+  uint32_t count; int16_t x, y; uint8_t subs; bool enabled;
+  touch_diag_get(&count, &x, &y, &subs, &enabled);
+  prompt_send_response_fmt(buf, sizeof(buf),
+      "touch: events=%lu last=(%d,%d) subscribers=%u enabled=%d",
+      (unsigned long)count, (int)x, (int)y, (unsigned)subs, (int)enabled);
+}
+
 void command_dart_tap(void) {
   char buf[160];
   bool ok = dart_app_inject_tap(100.0, 114.0);
