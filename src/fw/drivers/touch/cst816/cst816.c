@@ -273,6 +273,30 @@ void touch_sensor_init(void) {
   touch_sensor_set_enabled(false);
 }
 
+// Consecutive I2C failures in the IRQ-drain path. Each recovery does a
+// ~120ms reset sleep on the system task and re-enables the interrupt; a chip
+// whose INT keeps firing while reads keep failing turns that into a loop that
+// starves KernelBG (console, PutBytes, everything). Cap it and give up loudly.
+#define CST816_MAX_CONSECUTIVE_FAILURES 3
+static uint8_t s_consecutive_failures;
+static uint32_t s_diag_read_fail_count;
+uint32_t touch_sensor_diag_read_fail_count(void) {
+  return s_diag_read_fail_count;
+}
+
+static void prv_recover_or_give_up(const char *what) {
+  s_diag_read_fail_count++;
+  PBL_LOG_ERR("Failed to read %s (consecutive=%u)", what, s_consecutive_failures + 1);
+  touch_handle_update(TouchState_FingerUp, 0, 0);
+  exti_disable(CST816->int_exti);
+  if (++s_consecutive_failures >= CST816_MAX_CONSECUTIVE_FAILURES) {
+    PBL_LOG_ERR("CST816 unrecoverable after %u attempts -- touch disabled", s_consecutive_failures);
+    touch_sensor_set_enabled(false);
+    return;
+  }
+  touch_sensor_set_enabled(true);
+}
+
 static void prv_process_pending_messages(void* context) {
   bool rv;
   s_callback_scheduled = false;
@@ -283,22 +307,17 @@ static void prv_process_pending_messages(void* context) {
   uint8_t id;
   rv = prv_read_data(CST816_GESTURE_ID, &id, 1, 1);
   if (!rv) {
-    PBL_LOG_ERR("Failed to read gesture ID, trying to recover");
-    touch_handle_update(TouchState_FingerUp, 0, 0);
-    exti_disable(CST816->int_exti);
-    touch_sensor_set_enabled(true);
+    prv_recover_or_give_up("gesture ID");
     return;
   }
 
   uint8_t data[CST816_TOUCH_DATA_SIZE] = {0};
   rv = prv_read_data(CST816_TOUCH_DATA_REG, data, CST816_TOUCH_DATA_SIZE, 1);
   if (!rv) {
-    PBL_LOG_ERR("Failed to read touch data, trying to recover");
-    touch_handle_update(TouchState_FingerUp, 0, 0);
-    exti_disable(CST816->int_exti);
-    touch_sensor_set_enabled(true);
+    prv_recover_or_give_up("touch data");
     return;
   }
+  s_consecutive_failures = 0;
 
   uint8_t press = data[0] & 0x0F;
   GPoint point = {

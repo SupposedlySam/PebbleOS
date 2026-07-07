@@ -710,8 +710,9 @@ void command_touch_status(void) {
   uint32_t count; int16_t x, y; uint8_t subs; bool enabled;
   touch_diag_get(&count, &x, &y, &subs, &enabled);
   prompt_send_response_fmt(buf, sizeof(buf),
-      "touch: events=%lu isr=%lu last=(%d,%d) subscribers=%u enabled=%d",
+      "touch: events=%lu isr=%lu readfail=%lu last=(%d,%d) subscribers=%u enabled=%d",
       (unsigned long)count, (unsigned long)touch_sensor_diag_isr_count(),
+      (unsigned long)touch_sensor_diag_read_fail_count(),
       (int)x, (int)y, (unsigned)subs, (int)enabled);
 }
 
