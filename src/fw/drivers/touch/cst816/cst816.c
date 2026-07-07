@@ -417,8 +417,11 @@ void touch_sensor_set_enabled(bool enabled) {
     if (regular_timer_is_scheduled(&s_watchdog_timer)) {
       regular_timer_remove_callback(&s_watchdog_timer);
     }
-    uint8_t data = CST816_POWER_MODE_SLEEP;
-    prv_write_data(CST816_POWER_MODE_REG, &data, 1, 1);
+    /* Do NOT write CST816_POWER_MODE_SLEEP: deep sleep is only exited via the
+       reset line, and if that routing is broken the chip keeps answering I2C
+       (so a wake-verify passes) while touch scanning stays off forever --
+       isr=0 with everything else looking healthy. Disabling the EXTI is
+       enough; the idle chip draws little without deep sleep. */
     exti_disable(CST816->int_exti);
   }
 }
