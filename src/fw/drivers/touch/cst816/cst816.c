@@ -332,7 +332,13 @@ static void prv_process_pending_messages(void* context) {
   }
 }
 
+static uint32_t s_diag_isr_count;
+uint32_t touch_sensor_diag_isr_count(void) {
+  return s_diag_isr_count;
+}
+
 static void prv_exti_cb(bool *should_context_switch) {
+  s_diag_isr_count++;
   if (s_callback_scheduled) {
     return;
   }
@@ -374,6 +380,13 @@ static void prv_watchdog_cb(void *data) {
 void touch_sensor_set_enabled(bool enabled) {
   if (enabled) {
     cst816_hw_reset();
+    // The chip only exits deep sleep via the reset line; verify it actually
+    // woke (the reset routing is board-specific) so a silent no-op reset shows
+    // up in the log ring instead of as "touch just doesn't work".
+    uint8_t chip_id = 0;
+    if (!prv_read_data(CST816_CHIP_ID_REG, &chip_id, 1, 1)) {
+      PBL_LOG_ERR("CST816 did not wake after reset -- touch will be dead");
+    }
     exti_enable(CST816->int_exti);
     s_enabled = true;
     s_activity_since_check = true;

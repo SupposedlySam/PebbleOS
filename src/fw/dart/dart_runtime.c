@@ -25,6 +25,7 @@
 #include "wamr_pebble_glue.h"
 #include "pbl/services/system_task.h"
 #include "pbl/services/touch/touch.h"
+#include "drivers/touch/touch_sensor.h"
 #include "process_management/app_manager.h"
 #include "system/logging.h"
 #include "util/heap.h"
@@ -698,8 +699,9 @@ void command_touch_status(void) {
   uint32_t count; int16_t x, y; uint8_t subs; bool enabled;
   touch_diag_get(&count, &x, &y, &subs, &enabled);
   prompt_send_response_fmt(buf, sizeof(buf),
-      "touch: events=%lu last=(%d,%d) subscribers=%u enabled=%d",
-      (unsigned long)count, (int)x, (int)y, (unsigned)subs, (int)enabled);
+      "touch: events=%lu isr=%lu last=(%d,%d) subscribers=%u enabled=%d",
+      (unsigned long)count, (unsigned long)touch_sensor_diag_isr_count(),
+      (int)x, (int)y, (unsigned)subs, (int)enabled);
 }
 
 void command_dart_tap(void) {

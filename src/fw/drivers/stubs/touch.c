@@ -8,3 +8,7 @@ void touch_sensor_init(void) {
 
 void touch_sensor_set_enabled(bool enabled) {
 }
+
+uint32_t touch_sensor_diag_isr_count(void) {
+  return 0;
+}

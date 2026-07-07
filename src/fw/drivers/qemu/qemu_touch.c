@@ -66,3 +66,7 @@ void touch_sensor_init(void) {
 void touch_sensor_set_enabled(bool enabled) {
   REG32(QEMU_TOUCH_BASE + TOUCH_INTCTRL) = enabled ? INT_TOUCH_EVENT : 0;
 }
+
+uint32_t touch_sensor_diag_isr_count(void) {
+  return 0;
+}
