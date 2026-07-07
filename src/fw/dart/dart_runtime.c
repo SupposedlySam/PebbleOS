@@ -27,6 +27,7 @@
 #include "pbl/services/touch/touch.h"
 #include "drivers/touch/touch_sensor.h"
 #include "process_management/app_manager.h"
+#include "process_management/process_manager.h"
 #include "system/logging.h"
 #include "util/heap.h"
 
@@ -686,12 +687,22 @@ void command_dart_flutter(void) {
 
 //! `dart tap`: inject a tap at the screen center into the resident app -> the
 //! counter increments and re-renders. Mirrors a physical button/touch press.
+//! Runs on the app task: the WASM exec env + GC state belong to it, so a
+//! console (KernelMain) dispatch must be posted over, not called directly --
+//! cross-task dispatch corrupts the interpreter and kills the app. (This was
+//! also the long-standing "KernelBG dart tap does nothing" mystery.)
+static void prv_tapat_app_cb(void *data) {
+  uint32_t packed = (uint32_t)(uintptr_t)data;
+  dart_app_dispatch_only((double)(packed >> 16), (double)(packed & 0xFFFF));
+}
+
 void command_dart_tapat(const char *x_str, const char *y_str) {
   char buf[160];
   int x = atoi(x_str), y = atoi(y_str);
-  bool ok = dart_app_dispatch_only((double)x, (double)y);
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: tapat (%d,%d) %s", x, y,
-                           ok ? "dispatched" : "FAILED (no app running?)");
+  uint32_t packed = ((uint32_t)x << 16) | ((uint32_t)y & 0xFFFF);
+  process_manager_send_callback_event_to_process(PebbleTask_App, prv_tapat_app_cb,
+                                                 (void *)(uintptr_t)packed);
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: tapat (%d,%d) posted to app task", x, y);
 }
 
 void command_touch_status(void) {

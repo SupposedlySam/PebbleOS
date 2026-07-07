@@ -901,6 +901,41 @@ static int32_t prv_display_height(wasm_exec_env_t env) {
 }
 
 /* signature chars: 'r' = externref/ref, 'i' = i32, 'I' = i64, 'F' = f64 */
+
+/* Ordered-dither span helpers: the C loop replaces per-pixel interpreter
+   writes (the dominant cost of dithered Material fills on-device). */
+static const uint8_t k_bayer16[16] = {0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
+
+static inline uint8_t prv_q2(int c, int th) {
+  /* c 0..255, th 0..15; channel promotes when frac > (th+0.5)/16 */
+  int v = c * 3, b = v / 255, rem = v - b * 255;
+  if (rem * 32 > th * 510 + 255) b++;
+  return b > 3 ? 3 : (uint8_t)b;
+}
+
+static void prv_fill_pattern(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset, int32_t len,
+                             int32_t b0, int32_t b1, int32_t b2, int32_t b3, int32_t phase) {
+  uint8_t *p = (uint8_t *)wamr_pebble_array_u8_data(fb) + offset;
+  const uint8_t pat[4] = { (uint8_t)b0, (uint8_t)b1, (uint8_t)b2, (uint8_t)b3 };
+  for (int32_t i = 0; i < len; i++) p[i] = pat[(phase + i) & 3];
+}
+
+static void prv_blend_fill(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset, int32_t len,
+                           int32_t argb, int32_t x_phase, int32_t y_phase) {
+  uint8_t *p = (uint8_t *)wamr_pebble_array_u8_data(fb) + offset;
+  int a = (argb >> 24) & 0xFF, ia = 255 - a;
+  int sr = (argb >> 16) & 0xFF, sg = (argb >> 8) & 0xFF, sb = argb & 0xFF;
+  const uint8_t *brow = &k_bayer16[(y_phase & 3) << 2];
+  for (int32_t i = 0; i < len; i++) {
+    uint8_t d = p[i];
+    int r = (sr * a + ((d >> 4) & 3) * 85 * ia) / 255;
+    int g = (sg * a + ((d >> 2) & 3) * 85 * ia) / 255;
+    int b = (sb * a + (d & 3) * 85 * ia) / 255;
+    int th = brow[(x_phase + i) & 3];
+    p[i] = (uint8_t)(0xC0 | (prv_q2(r, th) << 4) | (prv_q2(g, th) << 2) | prv_q2(b, th));
+  }
+}
+
 static NativeSymbol s_dart_natives[] = {
     {"print", prv_print, "(r)"},
     {"stringFromAsciiBytes", prv_string_from_ascii_bytes, "(rii)r"},
@@ -921,6 +956,8 @@ static NativeSymbol s_dart_natives[] = {
     {"stringRepeat", prv_string_repeat, "(ri)r"},
     {"f64ToFixed", prv_f64_to_fixed, "(Fi)r"},
     {"randomInt", prv_random_int, "()I"},
+    {"fillPattern", prv_fill_pattern, "(riiiiiii)"},
+    {"blendFill", prv_blend_fill, "(riiiii)"},
     /* Flutter framework natives (ported from the host harness) */
     {"timelineStreamEnabled", prv_timeline_stream_enabled, "()i"},
     {"reportTaskEvent", prv_report_task_event, "(iiirr)i"},
