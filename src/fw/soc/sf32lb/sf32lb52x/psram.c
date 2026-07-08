@@ -300,9 +300,11 @@ void sf32lb52_psram_powerdown(void) {
   HAL_PIN_Set_Analog(PAD_SA07, 1);
   HAL_PIN_Set_Analog(PAD_SA05, 1);
   HAL_PIN_Set_Analog(PAD_SA12, 1);
-  // Cut the die rail (LDO18): set PD (overrides EN), as init.c does at boot.
-  hwp_pmuc->PERI_LDO |= PMUC_PERI_LDO_LDO18_PD_Msk;
-  hwp_pmuc->PERI_LDO &= ~PMUC_PERI_LDO_EN_LDO18_Msk;
+  // Leave the LDO18 rail ON: cutting it left the die in a half-discharged
+  // limbo the wake path can't recover (re-init ran but CALCR never locked --
+  // the strobe cal needs a die that answers). The die is in deep power-down
+  // (single-digit uA) and the LDO's no-load quiescent draw is comparable; the
+  // real battery win is the PLL + controller + unblocked SoC sleep, all off.
   s_psram_ready = false;
   s_psram_inited = false;
   s_psram_init_res = HAL_ERROR;
