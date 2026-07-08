@@ -957,8 +957,28 @@ static inline uint8_t prv_q2(int c, int th) {
   return b > 3 ? 3 : (uint8_t)b;
 }
 
+//! Bounds guard for the raw-pointer fill natives: these write straight into a
+//! GC-heap array, so ANY overrun corrupts neighboring heap objects -- the
+//! wasm-level fill8 (array.fill) traps on OOB, but these C loops would not.
+//! Clamp and scream: the ERR names the culprit op instead of a later GC crash.
+static bool prv_fill_bounds(wasm_obj_t fb, int32_t *offset, int32_t *len, const char *who) {
+  uint32_t n = wasm_array_obj_length((wasm_array_obj_t)fb);
+  if (*offset < 0 || *len <= 0 || (uint32_t)*offset >= n) {
+    PBL_LOG_ERR("dart: %s OOB off=%ld len=%ld n=%lu", who, (long)*offset, (long)*len,
+                (unsigned long)n);
+    return false;
+  }
+  if ((uint32_t)*offset + (uint32_t)*len > n) {
+    PBL_LOG_ERR("dart: %s CLAMP off=%ld len=%ld n=%lu", who, (long)*offset, (long)*len,
+                (unsigned long)n);
+    *len = (int32_t)(n - (uint32_t)*offset);
+  }
+  return true;
+}
+
 static void prv_fill_pattern(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset, int32_t len,
                              int32_t b0, int32_t b1, int32_t b2, int32_t b3, int32_t phase) {
+  if (!prv_fill_bounds(fb, &offset, &len, "fillPattern")) return;
   uint8_t *p = (uint8_t *)wamr_pebble_array_u8_data(fb) + offset;
   const uint8_t pat[4] = { (uint8_t)b0, (uint8_t)b1, (uint8_t)b2, (uint8_t)b3 };
   for (int32_t i = 0; i < len; i++) p[i] = pat[(phase + i) & 3];
@@ -966,6 +986,7 @@ static void prv_fill_pattern(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset,
 
 static void prv_blend_fill(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset, int32_t len,
                            int32_t argb, int32_t x_phase, int32_t y_phase) {
+  if (!prv_fill_bounds(fb, &offset, &len, "blendFill")) return;
   uint8_t *p = (uint8_t *)wamr_pebble_array_u8_data(fb) + offset;
   int a = (argb >> 24) & 0xFF, ia = 255 - a;
   int sr = (argb >> 16) & 0xFF, sg = (argb >> 8) & 0xFF, sb = argb & 0xFF;
