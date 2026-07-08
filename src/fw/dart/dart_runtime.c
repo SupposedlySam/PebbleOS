@@ -505,6 +505,10 @@ static uint32_t s_diag_dispatch_calls, s_diag_dispatch_ok;
 
 static bool prv_dispatch_tap_locked(double x, double y) {
   s_diag_dispatch_calls++;
+  if (dart_embedder_module_trapped()) {
+    PBL_LOG_WRN("dart: dispatch refused -- module trapped (state undefined)");
+    return false;
+  }
   if (!s_app_exec_env || !s_app_inject_tap) {
     PBL_LOG_WRN("dart: dispatch(%d,%d) with no app (env=%p tap=%p)",
                     (int)x, (int)y, s_app_exec_env, s_app_inject_tap);
@@ -542,7 +546,7 @@ static uint32_t s_diag_pump_calls, s_diag_pump_noenv;
 
 static void prv_pump_locked(void) {
   s_diag_pump_calls++;
-  if (!s_app_exec_env) {
+  if (!s_app_exec_env || dart_embedder_module_trapped()) {
     s_diag_pump_noenv++;
     return;
   }
@@ -877,12 +881,13 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d disp=%u/%u pump=%u/%u drained=%u init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
+      "dart: running=%s frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
       (unsigned)s_diag_dispatch_ok, (unsigned)s_diag_dispatch_calls,
       (unsigned)(s_diag_pump_calls - s_diag_pump_noenv), (unsigned)s_diag_pump_calls,
       (unsigned)dart_embedder_diag_tasks_drained(),
+      (int)dart_embedder_module_trapped(),
       (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,
       (unsigned)s_main_ms, (unsigned)s_frame_ms,
       (unsigned)s_last_tap_ms,

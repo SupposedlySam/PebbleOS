@@ -574,12 +574,15 @@ static int s_regexp_marker;
 /* Persistent GC roots for weakref/expando targets+values (documented strong-ref
    cheat: pinned alive for the app's lifetime). Uses the local-obj-ref stack,
    which is a GC root and IS linked (wasm_runtime_pin_object is not). */
-#define DART_PIN_MAX 1024
+#define DART_PIN_MAX 16384
 /* Pool-allocated (PSRAM), NOT static .bss: obelix SRAM is tight and a large
    static array here starved the boot-time allocations (v178 crash-looped). */
 static WASMLocalObjectRef *s_pins;
 static int s_pin_n;
 static bool s_roots_bound;
+//! Set when a WASM trap escaped a drained callback: Dart-side state is
+//! undefined (finally blocks skipped) and the module must not be pumped again.
+static bool s_module_trapped;
 
 //! LIFO CONTRACT (hard-won): WAMR's local-obj-ref chain is strictly LIFO --
 //! pushing a long-lived ref from inside a native call freezes every ref BELOW
@@ -606,15 +609,24 @@ void dart_embedder_bind_roots(wasm_exec_env_t env) {
 }
 
 void dart_embedder_reset_roots(void) {
-  /* The exec env (and its chain) is being destroyed; forget our fills. */
+  /* The exec env (and its chain) is being destroyed; forget our fills. The
+     pin array itself lives in the WAMR pool -- after a runtime teardown that
+     memory is gone/reissued, so DROP the pointer (rebind reallocates). */
   s_roots_bound = false;
   s_pin_n = 0;
+  s_pins = NULL;
   dart_embedder_reset_ev_roots();
+  s_module_trapped = false;
 }
 
 static void prv_pin(wasm_exec_env_t env, wasm_obj_t obj) {
   (void)env;
-  if (!obj || !s_roots_bound || !s_pins || s_pin_n >= DART_PIN_MAX) return;
+  if (!obj || !s_roots_bound || !s_pins) return;
+  if (s_pin_n >= DART_PIN_MAX) {
+    /* A silently unpinned expando value is a use-after-free at a distance. */
+    PBL_LOG_ERR("dart: pin table FULL (%d) -- object NOT rooted", s_pin_n);
+    return;
+  }
   s_pins[s_pin_n].val = obj;
   s_pin_n++;
 }
@@ -655,6 +667,11 @@ static void prv_expando_set(wasm_exec_env_t env, wasm_externref_obj_t expando,
   DartExpandoEntry *prev = NULL;
   for (DartExpandoEntry *e = h->head; e; prev = e, e = e->next) {
     if (e->hash == hash && e->target == target) {
+      /* Overwrite WITHOUT re-pinning: the old pin slot keeps the old value
+         alive harmlessly, and re-pinning every setState burns a slot per
+         frame until the table exhausts. New values get pinned only when the
+         ENTRY is created. (Slot-precise unpinning needs per-entry slot ids;
+         not worth it while entries are append-mostly.) */
       if (!value) { if (prev) prev->next = e->next; else h->head = e->next; wasm_runtime_free(e); }
       else { e->value = value; prv_pin(env, value); }
       return;
@@ -755,34 +772,57 @@ static int s_micro_n;
 static EvTask s_timer[EV_MAX];
 static int s_timer_n;
 static int s_timer_marker;
-#define EV_ROOT_MAX (2 * EV_MAX)
-static WASMLocalObjectRef s_roots[EV_ROOT_MAX];
-static int s_root_n;
+#define EV_ROOT_MAX (4 * EV_MAX) /* 2 fills per task, micro + timer */
+static WASMLocalObjectRef *s_roots; /* pool-allocated at bind (SRAM .bss is tight) */
+static int s_root_fill_hw; /* high-water of filled slots, for tail clearing */
 
 //! Pre-pushed at exec-env setup (see dart_embedder_bind_roots); fill-only.
 static void dart_embedder_bind_ev_roots(wasm_exec_env_t env) {
+  if (!s_roots) {
+    s_roots = (WASMLocalObjectRef *)wasm_runtime_malloc(EV_ROOT_MAX * sizeof(WASMLocalObjectRef));
+  }
+  if (!s_roots) {
+    PBL_LOG_ERR("dart: ev root pool alloc failed");
+    return;
+  }
   for (int i = 0; i < EV_ROOT_MAX; i++) {
     wasm_runtime_push_local_obj_ref(env, &s_roots[i]);
   }
 }
+
+//! Rewrite the root fills from the CURRENT queue contents (call after every
+//! queue mutation). Queued tasks stay rooted across drains; consumed ones
+//! unroot at once. O(queued) -- bounded by EV_MAX, trivial at drain rates.
+static void prv_ev_sync_roots(void) {
+  if (!s_roots) return;
+  int k = 0;
+  for (int i = 0; i < s_micro_n; i++) {
+    s_roots[k++].val = (wasm_obj_t)s_micro[i].cb;
+    s_roots[k++].val = s_micro[i].arg;
+  }
+  for (int i = 0; i < s_timer_n; i++) {
+    s_roots[k++].val = (wasm_obj_t)s_timer[i].cb;
+    s_roots[k++].val = s_timer[i].arg;
+  }
+  for (int i = k; i < s_root_fill_hw; i++) {
+    s_roots[i].val = NULL;
+  }
+  s_root_fill_hw = k;
+}
 static void dart_embedder_reset_ev_roots(void) {
-  s_root_n = 0;
+  if (s_micro_n > 0 || s_timer_n > 0) {
+    PBL_LOG_WRN("dart: %d micro + %d timers discarded at teardown (dead-instance funcrefs)",
+                s_micro_n, s_timer_n);
+  }
+  s_micro_n = 0;
+  s_timer_n = 0;
+  s_root_fill_hw = 0;
+  s_roots = NULL; /* pool memory dies with the runtime; rebind reallocates */
 }
 static void prv_ev_pin(wasm_exec_env_t env, const EvTask *t) {
   (void)env;
-  if (s_root_n + 2 > EV_ROOT_MAX) return;
-  s_roots[s_root_n].val = (wasm_obj_t)t->cb;
-  s_root_n++;
-  s_roots[s_root_n].val = t->arg;
-  s_root_n++;
-}
-static void prv_ev_release_roots(wasm_exec_env_t env) {
-  (void)env;
-  /* Slots stay pushed (LIFO bottom); just clear the fills. */
-  for (int i = 0; i < s_root_n; i++) {
-    s_roots[i].val = NULL;
-  }
-  s_root_n = 0;
+  (void)t;
+  prv_ev_sync_roots();
 }
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host
@@ -793,7 +833,12 @@ static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   wasm_runtime_call_func_ref(env, t->cb, 2, argv);
 }
 static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_obj_t arg) {
-  if (s_micro_n >= EV_MAX) return;
+  if (s_micro_n >= EV_MAX) {
+    /* Dart schedules its microtask loop exactly once per empty->non-empty
+       transition; dropping this request stalls ALL microtasks forever. */
+    PBL_LOG_ERR("dart: microtask queue FULL (%d) -- ASYNC STALLED", s_micro_n);
+    return;
+  }
   EvTask *t = &s_micro[s_micro_n++];
   t->cb = (wasm_func_obj_t)callback;
   t->arg = arg;
@@ -802,11 +847,17 @@ static void prv_queue_microtask(wasm_exec_env_t env, wasm_obj_t callback, wasm_o
 }
 static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay,
                                               wasm_obj_t callback, wasm_obj_t arg) {
+  if (s_timer_n >= EV_MAX) {
+    PBL_LOG_ERR("dart: timer queue FULL (%d) -- timer dropped", s_timer_n);
+    return NULL; /* NULL handle = Dart sees isActive=false (honest) */
+  }
   if (s_timer_n < EV_MAX) {
     EvTask *t = &s_timer[s_timer_n++];
     t->cb = (wasm_func_obj_t)callback;
     t->arg = arg;
-    t->due = delay < 0 ? 0 : delay;
+    /* Absolute deadline: `delay` arrives in MICROseconds (Dart Duration). */
+    int64_t now_ms = (int64_t)bh_get_tick_ms();
+    t->due = now_ms + (delay < 0 ? 0 : delay / 1000);
     prv_ev_pin(env, t);
   }
   return wasm_externref_obj_new(env, &s_timer_marker);
@@ -830,29 +881,67 @@ void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) 
   /* The guard caps runaway callback chains (an app rescheduling itself forever)
      without tripping on real workloads: a Flutter frame drains in tens of tasks. */
   int guard = 0;
+  bool tripped = false;
   s_diag_tasks_drained += (uint32_t)(s_micro_n + s_timer_n);
   while ((s_micro_n > 0 || s_timer_n > 0) && guard++ < 200000) {
     while (s_micro_n > 0) {
       EvTask t = s_micro[0];
       memmove(s_micro, s_micro + 1, (size_t)(--s_micro_n) * sizeof(EvTask));
+      /* t is briefly unrooted here, but no GC-heap allocation can occur
+         between this sync and the callee frame rooting the args (frame
+         setup uses the exec-env stack, not the GC heap). */
+      prv_ev_sync_roots();
       prv_ev_invoke(env, &t);
-      if (wasm_runtime_get_exception(inst)) goto out;
+      if (wasm_runtime_get_exception(inst)) goto trapped;
     }
     if (s_timer_n > 0) {
       int best = 0, i;
       for (i = 1; i < s_timer_n; i++) {
         if (s_timer[i].due < s_timer[best].due) best = i;
       }
+      /* Only run DUE timers: a not-yet-due earliest timer ends this drain --
+         the frame tick pumps again in 33ms. Running future timers immediately
+         made one pump play an entire animation to exhaustion (multi-second
+         drains, per-drain root-cap pressure, wildly-early delayed timers). */
+      if (s_timer[best].due > (int64_t)bh_get_tick_ms()) {
+        break;
+      }
       EvTask t = s_timer[best];
       memmove(s_timer + best, s_timer + best + 1, (size_t)(s_timer_n - best - 1) * sizeof(EvTask));
       s_timer_n--;
+      prv_ev_sync_roots();
       prv_ev_invoke(env, &t);
-      if (wasm_runtime_get_exception(inst)) goto out;
+      if (wasm_runtime_get_exception(inst)) goto trapped;
     }
   }
+  if (guard >= 200000) {
+    tripped = true;
+    PBL_LOG_ERR("dart: event-loop guard tripped with %d micro + %d timers queued",
+                s_micro_n, s_timer_n);
+  }
+  goto out;
+trapped:
+  tripped = true;
+  PBL_LOG_ERR("dart: trap mid-drain (%d micro + %d timers dropped): %s",
+              s_micro_n, s_timer_n, wasm_runtime_get_exception(inst));
+  /* A trap skips Dart's finally blocks: the module's zone/microtask machinery
+     is in an undefined state and MUST NOT be pumped again (the contract says
+     a trapped instance is dead). Clearing the exception here only keeps the
+     runtime's later teardown calls functional. */
+  wasm_runtime_clear_exception(inst);
+  s_module_trapped = true;
 out:
-  prv_ev_release_roots(env);
+  if (tripped) {
+    /* A trapped/guard-tripped module must not be pumped again; its queued
+       callbacks die here (and unroot via the sync below). */
+    s_micro_n = 0;
+    s_timer_n = 0;
+  }
+  prv_ev_sync_roots();
 }
+
+bool dart_embedder_module_trapped(void) { return s_module_trapped; }
+void dart_embedder_clear_trapped(void) { s_module_trapped = false; }
 
 /* ---- M3 present-frame + per-watch geometry bridges ---- */
 
