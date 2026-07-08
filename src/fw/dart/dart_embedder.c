@@ -779,10 +779,16 @@ static void prv_clear_schedule(wasm_exec_env_t env, wasm_externref_obj_t handle)
 /* Drain microtasks then the earliest-due timer until both empty (a static app
    quiesces) or a cap trips. Public so dart_runtime.c can pump it after the
    module's main() returns and after each injected input. */
+static uint32_t s_diag_tasks_drained;
+uint32_t dart_embedder_diag_tasks_drained(void) {
+  return s_diag_tasks_drained;
+}
+
 void dart_embedder_run_event_loop(wasm_exec_env_t env, wasm_module_inst_t inst) {
   /* The guard caps runaway callback chains (an app rescheduling itself forever)
      without tripping on real workloads: a Flutter frame drains in tens of tasks. */
   int guard = 0;
+  s_diag_tasks_drained += (uint32_t)(s_micro_n + s_timer_n);
   while ((s_micro_n > 0 || s_timer_n > 0) && guard++ < 200000) {
     while (s_micro_n > 0) {
       EvTask t = s_micro[0];
