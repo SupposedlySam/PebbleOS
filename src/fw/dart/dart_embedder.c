@@ -410,10 +410,14 @@ static int32_t prv_timeline_stream_enabled(wasm_exec_env_t env) { return 0; }
 static int32_t prv_report_task_event(wasm_exec_env_t env, int32_t a, int32_t b, int32_t c,
                                      wasm_externref_obj_t d, wasm_externref_obj_t e) { return 0; }
 static int32_t prv_monotonic_clock_frequency(wasm_exec_env_t env) { return 1000000; }
-static int64_t s_clock_ticks = 0;
+extern uint64_t bh_get_tick_ms(void);
 static int64_t prv_monotonic_clock_ticks(wasm_exec_env_t env) {
-  s_clock_ticks += 16667; /* ~one 60fps frame per query */
-  return s_clock_ticks;
+  /* REAL time (ms resolution scaled to the advertised 1MHz tick): Flutter's
+     animations, gesture velocity, and frame timestamps all measure this
+     clock. The old virtual +16.7ms-per-query version made every animation
+     replay its full 60fps frame count regardless of real frame cost -- at
+     ~13s/frame that turned one FAB tap into ~44 invisible renders (~10min). */
+  return (int64_t)bh_get_tick_ms() * 1000;
 }
 static int32_t prv_string_compare(wasm_exec_env_t env, wasm_externref_obj_t a, wasm_externref_obj_t b) {
   HStr *sa = prv_unwrap(a), *sb = prv_unwrap(b);
