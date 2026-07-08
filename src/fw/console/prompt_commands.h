@@ -305,6 +305,7 @@ extern void command_dart_gc(void);
 extern void command_dart_reload(void);
 extern void command_dart_tapat(const char *x_str, const char *y_str);
 extern void command_touch_status(void);
+extern void command_psram_off(void);
 extern void command_dart_counter(void);
 extern void command_screenshot(void);
 extern void command_screenshot_rows(const char *start_str, const char *count_str);
@@ -329,6 +330,7 @@ static const Command s_prompt_commands[] = {
   { "dart gc", command_dart_gc, 0 },
   { "dart reload", command_dart_reload, 0 },
   { "touch status", command_touch_status, 0 },
+  { "psram off", command_psram_off, 0 },
   { "dart counter", command_dart_counter, 0 },
   { "screenshot", command_screenshot, 0 },
   { "ssrows", command_screenshot_rows, 2 },

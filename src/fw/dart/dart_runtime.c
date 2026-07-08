@@ -354,6 +354,22 @@ static void prv_app_unload_module_locked(void) {
   if (s_app_buf) { wasm_runtime_free(s_app_buf); s_app_buf = NULL; }
 }
 
+//! Tear the whole Dart runtime down so PSRAM can be POWERED OFF: the WAMR
+//! runtime, GC heap, module cache, and allocator all live in the PSRAM pool,
+//! and any of them surviving a rail cut is a dangling pointer. After this,
+//! the next dart command re-inits from scratch (requires PSRAM back up).
+void dart_runtime_teardown(void) {
+  prv_app_lock();
+  prv_app_stop_locked();
+  prv_app_unload_module_locked();
+  if (s_initialized) {
+    wasm_runtime_destroy();
+    s_initialized = false;
+  }
+  prv_app_unlock();
+  PBL_LOG_DBG("dart: runtime torn down (PSRAM can power off)");
+}
+
 void dart_app_stop(void) {
   prv_app_lock();
   prv_app_stop_locked();
@@ -473,8 +489,13 @@ fail:
 //! dispatches then dart_app_pump() once, so N presses cost ONE render showing
 //! the final state (3 -> +10 presses -> 13), exactly like Flutter on any
 //! other platform. Caller must hold s_app_mutex.
+static uint32_t s_diag_dispatch_calls, s_diag_dispatch_ok;
+
 static bool prv_dispatch_tap_locked(double x, double y) {
+  s_diag_dispatch_calls++;
   if (!s_app_exec_env || !s_app_inject_tap) {
+    PBL_LOG_WRN("dart: dispatch(%d,%d) with no app (env=%p tap=%p)",
+                    (int)x, (int)y, s_app_exec_env, s_app_inject_tap);
     return false;
   }
   /* The exec env's stack-overflow guard describes the LAST bound task's stack;
@@ -489,6 +510,8 @@ static bool prv_dispatch_tap_locked(double x, double y) {
     PBL_LOG_ERR("dart: injectTap trap: %s", wasm_runtime_get_exception(s_app_inst));
     return false;
   }
+  s_diag_dispatch_ok++;
+  PBL_LOG_INFO("dart: injectTap(%d,%d) OK", (int)x, (int)y);
   return true;
 }
 
@@ -712,6 +735,25 @@ static void prv_tapat_app_cb(void *data) {
   dart_app_dispatch_only((double)(packed >> 16), (double)(packed & 0xFFFF));
 }
 
+//! `psram off`: full PSRAM power-down (battery). Tears the Dart runtime down
+//! first -- its pool lives in PSRAM. Runs the actual power-down on KernelBG
+//! (same privileged context as bring-up).
+static void prv_psram_off_cb(void *unused) {
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  sf32lb52_psram_powerdown();
+#endif
+}
+
+void command_psram_off(void) {
+  dart_runtime_teardown();
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  system_task_add_callback(prv_psram_off_cb, NULL);
+  prompt_send_response("psram: teardown queued (dart runtime destroyed; rail+PLL+controller going down)");
+#else
+  prompt_send_response("psram: no PSRAM on this board");
+#endif
+}
+
 void command_dart_tapat(const char *x_str, const char *y_str) {
   char buf[160];
   int x = atoi(x_str), y = atoi(y_str);
@@ -819,9 +861,10 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
+      "dart: running=%s frames=%d disp=%u/%u init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
       dart_embedder_frame_count(),
+      (unsigned)s_diag_dispatch_ok, (unsigned)s_diag_dispatch_calls,
       (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,
       (unsigned)s_main_ms, (unsigned)s_frame_ms,
       (unsigned)s_last_tap_ms,

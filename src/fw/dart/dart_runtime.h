@@ -13,6 +13,9 @@
 //! @return true on success.
 bool dart_runtime_init(void);
 
+//! Destroy the runtime + module cache + pool references so PSRAM can power off.
+void dart_runtime_teardown(void);
+
 //! Load, instantiate and run a dart2wasm --standalone module (calls
 //! $invokeMain with an empty args list). Output goes to the debug serial.
 //! @return true if the module ran without trapping.

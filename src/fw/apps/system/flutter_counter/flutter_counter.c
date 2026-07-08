@@ -76,6 +76,8 @@ static void prv_tap(ClickRecognizerRef recognizer, void *context) {
 //! panel coordinate, so hit-testing works (tap the FAB, not just anywhere).
 //! Rendering stays with the frame tick, same as button input.
 static void prv_touch(const TouchEvent *event, void *context) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "counter: touch type=%d (%d,%d)",
+          (int)event->type, (int)event->x, (int)event->y);
   if (event->type == TouchEvent_Touchdown) {
     dart_app_dispatch_only((double)event->x, (double)event->y);
   }
@@ -154,6 +156,17 @@ static void prv_init(void) {
   app_timer_register(400, prv_start, NULL);
 }
 
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+//! Runs on KernelBG after the app exits: with no Dart app resident, the whole
+//! PSRAM stack (die rail + 288MHz PLL + controller) idles at real battery cost
+//! -- it halved multi-day battery life. Power it down; the next launch pays
+//! the full bring-up + module parse again (~8s), which is the right trade on
+//! a wrist.
+static void prv_psram_powerdown_cb(void *unused) {
+  sf32lb52_psram_powerdown();
+}
+#endif
+
 static void prv_deinit(void) {
   CounterData *data = app_state_get_user_data();
   touch_service_unsubscribe();
@@ -162,6 +175,10 @@ static void prv_deinit(void) {
     s_frame_timer = NULL;
   }
   dart_app_stop();
+  dart_runtime_teardown();
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  system_task_add_callback(prv_psram_powerdown_cb, NULL);
+#endif
   window_destroy(data->window);
   task_free(data);
 }

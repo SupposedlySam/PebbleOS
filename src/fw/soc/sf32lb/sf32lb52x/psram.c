@@ -238,6 +238,43 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
 // controller. The real per-boot fix is the controller-clock correction in prv_psram_init (DLL2 288MHz
 // so the in-HAL delay-line cal locks), not a strobe sweep.
 
+//! Full PSRAM power-down: the reverse of bring-up, returning the SoC to its
+//! boot power state. The always-on PSRAM stack (die on LDO18 + DLL2 PLL at
+//! 288MHz + MPI1 controller) costs real battery -- the watch dropped from ~7
+//! days to 1-2 with it left up. Order matters: die to deep power-down first
+//! (needs a working controller), then controller off, then the PLL, then park
+//! the pads, then cut the die rail. Resets the init guards so a later
+//! bring-up runs the full sequence from this boot-like state.
+void sf32lb52_psram_powerdown(void) {
+  if (!s_psram_inited) {
+    return;
+  }
+  if (s_psram_ready) {
+    HAL_HYPER_PSRAM_DPD(&s_psram_handle);   // die: deep power-down
+  }
+  HAL_FLASH_DeInit(&s_psram_handle);        // MPI1 controller off
+  HAL_RCC_HCPU_DisableDLL2();               // 288MHz PLL off
+  // Park the pads back to analog (undo prv_restore_pinmux), as init.c leaves
+  // them at boot.
+  HAL_PIN_Set_Analog(PAD_SA01, 1);
+  HAL_PIN_Set_Analog(PAD_SA02, 1);
+  HAL_PIN_Set_Analog(PAD_SA03, 1);
+  HAL_PIN_Set_Analog(PAD_SA04, 1);
+  HAL_PIN_Set_Analog(PAD_SA08, 1);
+  HAL_PIN_Set_Analog(PAD_SA09, 1);
+  HAL_PIN_Set_Analog(PAD_SA10, 1);
+  HAL_PIN_Set_Analog(PAD_SA11, 1);
+  HAL_PIN_Set_Analog(PAD_SA07, 1);
+  HAL_PIN_Set_Analog(PAD_SA05, 1);
+  HAL_PIN_Set_Analog(PAD_SA12, 1);
+  // Cut the die rail (LDO18): set PD (overrides EN), as init.c does at boot.
+  hwp_pmuc->PERI_LDO |= PMUC_PERI_LDO_LDO18_PD_Msk;
+  hwp_pmuc->PERI_LDO &= ~PMUC_PERI_LDO_EN_LDO18_Msk;
+  s_psram_ready = false;
+  s_psram_inited = false;
+  s_psram_init_res = HAL_ERROR;
+}
+
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
 
 //! USABLE-SIZE PROBE (non-caching). A single write-one/read-one passes anywhere and a 1KB

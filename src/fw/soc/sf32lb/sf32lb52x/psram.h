@@ -23,6 +23,11 @@
 //! True once `psram` has brought up + verified the controller.
 bool sf32lb52_psram_is_ready(void);
 
+//! Power the whole PSRAM stack down (die + controller + PLL + rail); the next
+//! bring-up runs the full sequence again. Callers must tear down every PSRAM
+//! consumer first (the Dart runtime pool lives there).
+void sf32lb52_psram_powerdown(void);
+
 //! On-demand bring-up for in-firmware callers (e.g. the Counter app) with no console
 //! sink. div: 2=144MHz (default). Idempotent + crash-safe; sets sf32lb52_psram_is_ready().
 //! Call from a deferred/app path, NEVER at boot ([[psram-bringup-at-boot-bricks]]).
