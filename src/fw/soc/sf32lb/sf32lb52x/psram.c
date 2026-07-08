@@ -39,6 +39,18 @@
 #endif
 #define PSRAM_MSIZE_MB 16            // SF32LB52J embedded PSRAM
 
+#include "os/mutex.h"
+
+//! Serializes bring-up vs power-down across tasks (console/PULSE, KernelBG,
+//! app): interleaving rail/PLL/controller transitions hangs the watch.
+static PebbleMutex *s_psram_state_mutex;
+static PebbleMutex *prv_state_mutex(void) {
+  if (!s_psram_state_mutex) {
+    s_psram_state_mutex = mutex_create();
+  }
+  return s_psram_state_mutex;
+}
+
 static FLASH_HandleTypeDef s_psram_handle;
 static bool s_psram_ready;
 static bool s_psram_inited;                          // controller brought up (re-init hangs)
@@ -80,8 +92,11 @@ static uint32_t prv_psram_usable_at(uint32_t base_addr, uint32_t max_sz);
 //! the LAST line received pinpoints exactly which step hangs/faults (the bring-up has
 //! been crashing/hanging the watch; we need to know where).
 static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
+  mutex_lock(prv_state_mutex());
   if (s_psram_inited) {
-    return s_psram_init_res;
+    HAL_StatusTypeDef res = s_psram_init_res;
+    mutex_unlock(prv_state_mutex());
+    return res;
   }
 
   // POWER (corrected 2026-06-25 via SiFli HW spec + SDK): on the SF32LB52J SiP the PSRAM die is
@@ -142,7 +157,9 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
               (unsigned)dll2_hz, (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH2));
     emit(clkbuf); HAL_Delay_us(20000);
     if (dll2_hz == 0) {
-      emit("psram ERROR: DLL2 didn't enable -- aborting"); return HAL_ERROR;
+      emit("psram ERROR: DLL2 didn't enable -- aborting");
+      mutex_unlock(prv_state_mutex());
+      return HAL_ERROR;
     }
   }
   emit("psram step: ClockSelect FLASH1<-DLL2 call"); HAL_Delay_us(20000);
@@ -230,7 +247,11 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
   // the cache controller's PSRAM access / the SCK-DQS tap under cached bursts, not these knobs.
   s_psram_inited = true;
   emit("psram step: init returned");
-  return s_psram_init_res;
+  {
+    HAL_StatusTypeDef res = s_psram_init_res;
+    mutex_unlock(prv_state_mutex());
+    return res;
+  }
 }
 
 // NOTE: an earlier build added prv_psram_set_rxclkinv() to sweep MISCR.RXCLKINV -- removed. On 52x
@@ -246,7 +267,9 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
 //! the pads, then cut the die rail. Resets the init guards so a later
 //! bring-up runs the full sequence from this boot-like state.
 void sf32lb52_psram_powerdown(void) {
+  mutex_lock(prv_state_mutex());
   if (!s_psram_inited) {
+    mutex_unlock(prv_state_mutex());
     return;
   }
   if (s_psram_ready) {
@@ -273,6 +296,7 @@ void sf32lb52_psram_powerdown(void) {
   s_psram_ready = false;
   s_psram_inited = false;
   s_psram_init_res = HAL_ERROR;
+  mutex_unlock(prv_state_mutex());
 }
 
 bool sf32lb52_psram_is_ready(void) { return s_psram_ready; }
