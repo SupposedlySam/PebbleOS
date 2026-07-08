@@ -53,6 +53,11 @@ static PebbleMutex *prv_state_mutex(void) {
 
 static FLASH_HandleTypeDef s_psram_handle;
 static bool s_psram_ready;
+static uint32_t s_psram_verified_bytes;
+
+uint32_t sf32lb52_psram_verified_bytes(void) {
+  return s_psram_verified_bytes;
+}
 static bool s_psram_inited;                          // controller brought up (re-init hangs)
 static HAL_StatusTypeDef s_psram_init_res = HAL_ERROR;
 static uint32_t s_psram_pid = 0xff;
@@ -529,7 +534,12 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       // CONTIGUOUS bursts over the full 2MB pool, so a scattered/partial test would pass while bulk use
       // corrupts. Verify contiguous full-2MB + an inverse pass + scattered + multi-row, all clean.
       char r[180];
-      const uint32_t SPAN = 2u * 1024u * 1024u;  // == the extent dart_runtime hands WAMR (0x60000000)
+      // The span MUST cover the FULL extent dart_runtime hands WAMR: the pool
+      // grew 2MB -> 13MB for the Material app (v180) while this gate stayed at
+      // 2MB, leaving the GC heap + big allocations in UNVERIFIED memory --
+      // random-access GC sweeps up there corrupted pointers (the tap-crash
+      // family). Verify what will actually be used.
+      const uint32_t SPAN = 13u * 1024u * 1024u;  // == dart_runtime_pool size
       // ISOLATION run (no margin sweep): gate at the cal's UNTOUCHED tap. The margin DQS sweep was
       // removed as the prime suspect -- perturbing DQS then restoring MISCR may not fully recover the
       // strobe, which would fail the gate spuriously. This run answers one question: does the
@@ -543,10 +553,27 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       uint32_t done = (s_psram_handle.Instance->CALCR & MPI_CALCR_DONE_Msk) ? 1u : 0u;
       uint32_t clk = HAL_QSPI_GET_CLK(&s_psram_handle);
       s_psram_ready = (m >= 16u && c0 == 0u && c1 == 0u && rr == 0u);
+      s_psram_verified_bytes = s_psram_ready ? SPAN : 0u;
+      if (!s_psram_ready && m >= 16u) {
+        // The full span failed but rows work: find the largest PASSING prefix
+        // so the consumer can run in a smaller, verified pool instead of a
+        // corrupt big one. Halve until clean (>= 2MB floor).
+        uint32_t span = SPAN / 2u;
+        while (span >= 2u * 1024u * 1024u) {
+          if (prv_psram_contig_verify(span, 0) == 0u &&
+              prv_psram_contig_verify(span, 1) == 0u &&
+              prv_psram_random_test(span, 8000u, 0) == 0u) {
+            s_psram_verified_bytes = span;
+            s_psram_ready = true;
+            break;
+          }
+          span /= 2u;
+        }
+      }
       sniprintf(r, sizeof(r),
-                "psram VERIFY: clk=%uHz DONE=%u multirow=%u/16 contig=%u inv=%u rand=%u ready=%u",
+                "psram VERIFY: clk=%uHz DONE=%u multirow=%u/16 contig=%u inv=%u rand=%u ready=%u verified=%uMB",
                 (unsigned)clk, (unsigned)done, (unsigned)m, (unsigned)c0, (unsigned)c1, (unsigned)rr,
-                (unsigned)s_psram_ready);
+                (unsigned)s_psram_ready, (unsigned)(s_psram_verified_bytes >> 20));
       emit(r);
     }
   }

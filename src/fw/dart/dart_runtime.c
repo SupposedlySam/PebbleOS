@@ -117,7 +117,12 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
     // Material app is a 2.37MB module + a bigger GC object graph -- 8MB failed
     // instantiate ("allocate memory failed"). 13MB leaves headroom for the
     // module copy + 3MB GC heap + 1MB operand stack + linear memory.
-    *size = 13u * 1024u * 1024u;
+    // Never exceed what the bring-up actually VERIFIED: the pool ran 13MB
+    // while the verify gated only 2MB, so the GC heap lived in unverified
+    // PSRAM -- random-access sweeps there corrupted pointers (tap crashes).
+    uint32_t verified = sf32lb52_psram_verified_bytes();
+    uint32_t want = 13u * 1024u * 1024u;
+    *size = verified && verified < want ? verified : want;
     return true;
   }
 #endif

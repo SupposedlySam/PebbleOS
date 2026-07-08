@@ -28,6 +28,10 @@ bool sf32lb52_psram_is_ready(void);
 //! consumer first (the Dart runtime pool lives there).
 void sf32lb52_psram_powerdown(void);
 
+//! Bytes of PSRAM that passed the bring-up verify (contig+inverse+random over
+//! the span). The WAMR pool must not exceed this.
+uint32_t sf32lb52_psram_verified_bytes(void);
+
 //! On-demand bring-up for in-firmware callers (e.g. the Counter app) with no console
 //! sink. div: 2=144MHz (default). Idempotent + crash-safe; sets sf32lb52_psram_is_ready().
 //! Call from a deferred/app path, NEVER at boot ([[psram-bringup-at-boot-bricks]]).
