@@ -272,6 +272,16 @@ void sf32lb52_psram_powerdown(void) {
     mutex_unlock(prv_state_mutex());
     return;
   }
+  // The PSRAM window (0x60000000) is cacheable write-back: DISCARD any lines
+  // for it before the bus dies, or a later eviction writes dirty lines back
+  // into a disabled controller -- an asynchronous bus fault long after this
+  // function returns (coredump-verified on the first off->on round-trip).
+  // Invalidate (not clean: the die's contents are garbage after the rail cut
+  // anyway, and writing to a dying die is the exact hazard).
+  __DSB();
+  SCB_InvalidateDCache_by_Addr((void *)PSRAM_TEST_BASE, 13 * 1024 * 1024);
+  __DSB();
+  __ISB();
   if (s_psram_ready) {
     HAL_HYPER_PSRAM_DPD(&s_psram_handle);   // die: deep power-down
   }
