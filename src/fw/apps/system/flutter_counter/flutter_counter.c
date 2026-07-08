@@ -162,7 +162,7 @@ static void prv_init(void) {
 //! -- it halved multi-day battery life. Power it down; the next launch pays
 //! the full bring-up + module parse again (~8s), which is the right trade on
 //! a wrist.
-static void prv_psram_powerdown_cb(void *unused) {
+__attribute__((unused)) static void prv_psram_powerdown_cb(void *unused) {
   sf32lb52_psram_powerdown();
 }
 #endif
@@ -175,10 +175,12 @@ static void prv_deinit(void) {
     s_frame_timer = NULL;
   }
   dart_app_stop();
-  dart_runtime_teardown();
-#if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  system_task_add_callback(prv_psram_powerdown_cb, NULL);
-#endif
+  // NOTE: auto PSRAM power-down on exit is DISABLED for now: the manual
+  // console round-trip (psram off -> psram 2 -> launch) is verified stable,
+  // but this in-deinit path raced the next launch into a silent hardware
+  // reset (no coredump). Power-down stays a console/session-teardown action
+  // (`psram off`) until that race is root-caused. The teardown+powerdown
+  // helpers stay, and prv_psram_powerdown_cb documents the intended shape.
   window_destroy(data->window);
   task_free(data);
 }
