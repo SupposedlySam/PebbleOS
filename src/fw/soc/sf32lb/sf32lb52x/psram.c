@@ -286,6 +286,11 @@ void sf32lb52_psram_powerdown(void) {
     HAL_HYPER_PSRAM_DPD(&s_psram_handle);   // die: deep power-down
   }
   HAL_FLASH_DeInit(&s_psram_handle);        // MPI1 controller off
+  // Hardware-reset the controller so every MPI1 register returns to its POR
+  // default: DeInit only clears the enable bit, and the next bring-up's init
+  // assumes boot state (stale HYPER/latency/cal registers left the re-init
+  // "successful" but with an unlockable strobe cal, usable=64KB).
+  HAL_RCC_ResetModule(RCC_MOD_MPI1);
   HAL_RCC_HCPU_DisableDLL2();               // 288MHz PLL off
   // Park the pads back to analog (undo prv_restore_pinmux), as init.c leaves
   // them at boot.
