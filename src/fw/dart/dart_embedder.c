@@ -575,13 +575,42 @@ static int s_regexp_marker;
    static array here starved the boot-time allocations (v178 crash-looped). */
 static WASMLocalObjectRef *s_pins;
 static int s_pin_n;
-static void prv_pin(wasm_exec_env_t env, wasm_obj_t obj) {
-  if (!obj) return;
+static bool s_roots_bound;
+
+//! LIFO CONTRACT (hard-won): WAMR's local-obj-ref chain is strictly LIFO --
+//! pushing a long-lived ref from inside a native call freezes every ref BELOW
+//! it, and a later out-of-order pop leaves a DEAD STACK ref in the GC root
+//! chain (the GC then chases FreeRTOS stack poison 0xa5a5a5a5 forever; that
+//! was the tap hang). So: ALL slots are pushed ONCE here, at exec-env setup,
+//! forming the stable bottom of the chain with val=NULL (the traverse range-
+//! checks val, NULL is skipped). Pinning later only FILLS a slot -- no push,
+//! no pop, LIFO untouched.
+static void dart_embedder_bind_ev_roots(wasm_exec_env_t env);
+static void dart_embedder_reset_ev_roots(void);
+
+void dart_embedder_bind_roots(wasm_exec_env_t env) {
+  if (s_roots_bound) return;
   if (!s_pins) {
     s_pins = (WASMLocalObjectRef *)wasm_runtime_malloc(DART_PIN_MAX * sizeof(WASMLocalObjectRef));
   }
-  if (!s_pins || s_pin_n >= DART_PIN_MAX) return;
-  wasm_runtime_push_local_obj_ref(env, &s_pins[s_pin_n]);
+  if (!s_pins) return;
+  for (int i = 0; i < DART_PIN_MAX; i++) {
+    wasm_runtime_push_local_obj_ref(env, &s_pins[i]);
+  }
+  dart_embedder_bind_ev_roots(env);
+  s_roots_bound = true;
+}
+
+void dart_embedder_reset_roots(void) {
+  /* The exec env (and its chain) is being destroyed; forget our fills. */
+  s_roots_bound = false;
+  s_pin_n = 0;
+  dart_embedder_reset_ev_roots();
+}
+
+static void prv_pin(wasm_exec_env_t env, wasm_obj_t obj) {
+  (void)env;
+  if (!obj || !s_roots_bound || !s_pins || s_pin_n >= DART_PIN_MAX) return;
   s_pins[s_pin_n].val = obj;
   s_pin_n++;
 }
@@ -726,21 +755,30 @@ static int s_timer_marker;
 static WASMLocalObjectRef s_roots[EV_ROOT_MAX];
 static int s_root_n;
 
+//! Pre-pushed at exec-env setup (see dart_embedder_bind_roots); fill-only.
+static void dart_embedder_bind_ev_roots(wasm_exec_env_t env) {
+  for (int i = 0; i < EV_ROOT_MAX; i++) {
+    wasm_runtime_push_local_obj_ref(env, &s_roots[i]);
+  }
+}
+static void dart_embedder_reset_ev_roots(void) {
+  s_root_n = 0;
+}
 static void prv_ev_pin(wasm_exec_env_t env, const EvTask *t) {
+  (void)env;
   if (s_root_n + 2 > EV_ROOT_MAX) return;
-  /* val MUST be assigned AFTER push (push zeroes it) -- else nothing is rooted. */
-  wasm_runtime_push_local_obj_ref(env, &s_roots[s_root_n]);
   s_roots[s_root_n].val = (wasm_obj_t)t->cb;
   s_root_n++;
-  wasm_runtime_push_local_obj_ref(env, &s_roots[s_root_n]);
   s_roots[s_root_n].val = t->arg;
   s_root_n++;
 }
 static void prv_ev_release_roots(wasm_exec_env_t env) {
-  if (s_root_n > 0) {
-    wasm_runtime_pop_local_obj_refs(env, (uint32_t)s_root_n);
-    s_root_n = 0;
+  (void)env;
+  /* Slots stay pushed (LIFO bottom); just clear the fills. */
+  for (int i = 0; i < s_root_n; i++) {
+    s_roots[i].val = NULL;
   }
+  s_root_n = 0;
 }
 static void prv_ev_invoke(wasm_exec_env_t env, const EvTask *t) {
   /* WAMR GC call ABI: a reference argument occupies 2 cells regardless of host

@@ -334,7 +334,11 @@ static void prv_app_stop_locked(void) {
   // Flutter paints again. (present-frame renders through the normal app-framebuffer
   // path, so there is no compositor freeze to undo here.)
   dart_embedder_reset_frame();
-  if (s_app_exec_env) { wasm_runtime_destroy_exec_env(s_app_exec_env); s_app_exec_env = NULL; }
+  if (s_app_exec_env) {
+    dart_embedder_reset_roots();
+    wasm_runtime_destroy_exec_env(s_app_exec_env);
+    s_app_exec_env = NULL;
+  }
   if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
   s_app_inject_tap = NULL;
 }
@@ -436,6 +440,9 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     strncpy(s_module_fail, "exec_env", sizeof(s_module_fail) - 1);
     goto fail;
   }
+  /* Permanent GC-root slots go in NOW, before any module code runs, forming
+     the stable bottom of the local-ref chain (LIFO contract; see embedder). */
+  dart_embedder_bind_roots(s_app_exec_env);
   s_inst_ms = (uint32_t)bh_get_tick_ms() - t_inst_ms;
   uint32_t t_main_ms = (uint32_t)bh_get_tick_ms();
   PBL_LOG_ALWAYS("dart phase: main start");
