@@ -1133,7 +1133,12 @@ static inline void prv_fill_span(uint8_t *fb, int w, int y, int xa, int xb, cons
 //! frame's raster). meta = [w,h,nsub,argb,evenOdd,cx0,cy0,cx1,cy1, len0,...];
 //! pts = concatenated subpath points in device px (packed to 3 ref args -- the
 //! trampoline drops scalar args past the 8th).
-#define FP_MAX_XS 512
+// Max edge crossings tracked per scanline. Kept small: xs[]+wind[] live on the
+// app task's stack, reached through a deep WASM interpreter call chain, so a
+// large frame here risks a hard fault (see the C-stack-depth notes). Material
+// paths cross <=~8 edges/scanline; the `nx < FP_MAX_XS` guard clamps any excess
+// (that one scanline mis-fills, never crashes).
+#define FP_MAX_XS 96
 static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts_obj,
                           wasm_obj_t meta_obj) {
   (void)env;
