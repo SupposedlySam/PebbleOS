@@ -760,6 +760,7 @@ typedef struct {
   wasm_func_obj_t cb;
   wasm_obj_t arg;
   int64_t due;
+  uint32_t id; /* unique, nonzero; identifies the timer for clearSchedule */
 } EvTask;
 /* Sized from measured host peaks for the counter (root_peak=22, micro_peak=1,
    timer_peak=5, task_total=11) with ~20x margin -- MCU SRAM is tight (8192, the
@@ -771,7 +772,7 @@ static EvTask s_micro[EV_MAX];
 static int s_micro_n;
 static EvTask s_timer[EV_MAX];
 static int s_timer_n;
-static int s_timer_marker;
+static uint32_t s_next_timer_id = 1;
 #define EV_ROOT_MAX (4 * EV_MAX) /* 2 fills per task, micro + timer */
 static WASMLocalObjectRef *s_roots; /* pool-allocated at bind (SRAM .bss is tight) */
 static int s_root_fill_hw; /* high-water of filled slots, for tail clearing */
@@ -851,22 +852,46 @@ static wasm_externref_obj_t prv_schedule_once(wasm_exec_env_t env, int64_t delay
     PBL_LOG_ERR("dart: timer queue FULL (%d) -- timer dropped", s_timer_n);
     return NULL; /* NULL handle = Dart sees isActive=false (honest) */
   }
-  if (s_timer_n < EV_MAX) {
-    EvTask *t = &s_timer[s_timer_n++];
-    t->cb = (wasm_func_obj_t)callback;
-    t->arg = arg;
-    /* Absolute deadline: `delay` arrives in MICROseconds (Dart Duration). */
-    int64_t now_ms = (int64_t)bh_get_tick_ms();
-    t->due = now_ms + (delay < 0 ? 0 : delay / 1000);
-    prv_ev_pin(env, t);
+  EvTask *t = &s_timer[s_timer_n++];
+  t->cb = (wasm_func_obj_t)callback;
+  t->arg = arg;
+  /* Absolute deadline: `delay` arrives in MICROseconds (Dart Duration). */
+  int64_t now_ms = (int64_t)bh_get_tick_ms();
+  t->due = now_ms + (delay < 0 ? 0 : delay / 1000);
+  t->id = s_next_timer_id++;
+  if (s_next_timer_id == 0) s_next_timer_id = 1; /* skip 0 (the "none" sentinel) */
+  prv_ev_pin(env, t);
+  /* Return the id boxed as an externref so Timer.cancel -> clearSchedule can
+     find THIS timer. A no-op clearSchedule let InkWell's activation timer fire
+     AFTER its widget was disposed -> statesController's internalStatesController!
+     null-asserted -> device-only TypeError that killed every tap after the first. */
+  uint32_t *box = (uint32_t *)wasm_runtime_malloc(sizeof(uint32_t));
+  if (box) {
+    *box = t->id;
+    wasm_externref_obj_t h = wasm_externref_obj_new(env, box);
+    if (h) {
+      /* Free the box when Dart drops the handle (else a 4B pool leak per timer). */
+      wasm_obj_set_gc_finalizer(env, (wasm_obj_t)h, prv_host_free_finalizer, box);
+      return h;
+    }
+    wasm_runtime_free(box);
   }
-  return wasm_externref_obj_new(env, &s_timer_marker);
+  return NULL;
 }
-/* No-op: the static Material counter never needs to cancel a timer, and
-   tracking cancellable ids would regrow EvTask (SRAM). A timer that "should
-   have" been canceled just fires once harmlessly. */
 static void prv_clear_schedule(wasm_exec_env_t env, wasm_externref_obj_t handle) {
-  (void)env; (void)handle;
+  (void)env;
+  if (!handle) return;
+  uint32_t *box = (uint32_t *)wasm_externref_obj_get_value(handle);
+  if (!box) return;
+  uint32_t id = *box;
+  for (int i = 0; i < s_timer_n; i++) {
+    if (s_timer[i].id == id) {
+      memmove(s_timer + i, s_timer + i + 1, (size_t)(s_timer_n - i - 1) * sizeof(EvTask));
+      s_timer_n--;
+      prv_ev_sync_roots(); /* the removed timer's cb/arg unroot */
+      return;
+    }
+  }
 }
 
 /* Drain microtasks then the earliest-due timer until both empty (a static app
