@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 /* The firmware builds -ffreestanding with a reduced libc header set; strtod is
@@ -1094,6 +1095,109 @@ static bool prv_fill_bounds(wasm_obj_t fb, int32_t *offset, int32_t *len, const 
   return true;
 }
 
+typedef struct { int mode; uint8_t c8; uint8_t p16[16]; int a, sr, sg, sb; } CShade;
+static void prv_shade_of(int argb, CShade *sh) {
+  int a = (argb >> 24) & 0xff, r = (argb >> 16) & 0xff, g = (argb >> 8) & 0xff, b = argb & 0xff;
+  if (a < 0xF8) { sh->mode = 2; sh->a = a; sh->sr = r; sh->sg = g; sh->sb = b; return; }
+  int same = 1;
+  for (int i = 0; i < 16; i++) {
+    int th = k_bayer16[i];
+    sh->p16[i] = (uint8_t)(0xC0 | (prv_q2(r, th) << 4) | (prv_q2(g, th) << 2) | prv_q2(b, th));
+    if (sh->p16[i] != sh->p16[0]) same = 0;
+  }
+  sh->mode = same ? 0 : 1;
+  sh->c8 = sh->p16[0];
+}
+static inline void prv_fill_span(uint8_t *fb, int w, int y, int xa, int xb, const CShade *sh) {
+  if (xb <= xa) return;
+  uint8_t *row = fb + (size_t)y * w;
+  if (sh->mode == 0) { memset(row + xa, sh->c8, (size_t)(xb - xa)); return; }
+  if (sh->mode == 1) {
+    int base = (y & 3) << 2;
+    for (int x = xa; x < xb; x++) row[x] = sh->p16[base | (x & 3)];
+    return;
+  }
+  int a = sh->a, ia = 255 - a; const uint8_t *brow = &k_bayer16[(y & 3) << 2];
+  for (int x = xa; x < xb; x++) {
+    uint8_t d = row[x];
+    int r = (sh->sr * a + ((d >> 4) & 3) * 85 * ia) / 255;
+    int g = (sh->sg * a + ((d >> 2) & 3) * 85 * ia) / 255;
+    int b = (sh->sb * a + (d & 3) * 85 * ia) / 255;
+    int th = brow[x & 3];
+    row[x] = (uint8_t)(0xC0 | (prv_q2(r, th) << 4) | (prv_q2(g, th) << 2) | prv_q2(b, th));
+  }
+}
+
+//! Native scanline polygon fill (mirror of engine.dart _fillPath): the
+//! O(rows*edges) crossing+sort loop dominated the interpreter (~74% of a
+//! frame's raster). meta = [w,h,nsub,argb,evenOdd,cx0,cy0,cx1,cy1, len0,...];
+//! pts = concatenated subpath points in device px (packed to 3 ref args -- the
+//! trampoline drops scalar args past the 8th).
+#define FP_MAX_XS 512
+static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts_obj,
+                          wasm_obj_t meta_obj) {
+  (void)env;
+  uint8_t *fb = (uint8_t *)wamr_pebble_array_u8_data(fb_obj);
+  const double *pts = (const double *)wamr_pebble_array_u8_data(pts_obj);
+  const int32_t *meta = (const int32_t *)wamr_pebble_array_u8_data(meta_obj);
+  if (!fb || !pts || !meta) return;
+  int w = meta[0], h = meta[1], nsub = meta[2], argb = meta[3], even_odd = meta[4];
+  int cx0 = meta[5], cy0 = meta[6], cx1 = meta[7], cy1 = meta[8];
+  const int32_t *lens = meta + 9;
+  if (cx0 < 0) { cx0 = 0; }
+  if (cy0 < 0) { cy0 = 0; }
+  if (cx1 > w) { cx1 = w; }
+  if (cy1 > h) { cy1 = h; }
+  if (cx1 <= cx0 || cy1 <= cy0) return;
+  CShade sh; prv_shade_of(argb, &sh);
+  double xs[FP_MAX_XS]; int wind[FP_MAX_XS];
+  for (int y = cy0; y < cy1; y++) {
+    double yc = y + 0.5;
+    int nx = 0, base = 0;
+    for (int s = 0; s < nsub; s++) {
+      int n = lens[s] / 2;
+      const double *sp = pts + base;
+      base += lens[s];
+      if (n < 2) continue;
+      for (int i = 0, j = n - 1; i < n; j = i++) {
+        double xi = sp[i * 2], yi = sp[i * 2 + 1];
+        double xj = sp[j * 2], yj = sp[j * 2 + 1];
+        if ((yi <= yc && yj > yc) || (yj <= yc && yi > yc)) {
+          if (nx < FP_MAX_XS) {
+            xs[nx] = xi + (yc - yi) / (yj - yi) * (xj - xi);
+            wind[nx] = yj > yi ? 1 : -1; nx++;
+          }
+        }
+      }
+    }
+    if (nx == 0) continue;
+    for (int a = 1; a < nx; a++) {
+      double vx = xs[a]; int vw = wind[a]; int b = a - 1;
+      while (b >= 0 && xs[b] > vx) { xs[b + 1] = xs[b]; wind[b + 1] = wind[b]; b--; }
+      xs[b + 1] = vx; wind[b + 1] = vw;
+    }
+    if (even_odd) {
+      for (int k = 0; k + 1 < nx; k += 2) {
+        int xa = (int)ceil(xs[k]), xb = (int)ceil(xs[k + 1]);
+        if (xa < cx0) { xa = cx0; }
+        if (xb > cx1) { xb = cx1; }
+        prv_fill_span(fb, w, y, xa, xb, &sh);
+      }
+    } else {
+      int acc = 0;
+      for (int k = 0; k + 1 < nx; k++) {
+        acc += wind[k];
+        if (acc != 0) {
+          int xa = (int)ceil(xs[k]), xb = (int)ceil(xs[k + 1]);
+          if (xa < cx0) { xa = cx0; }
+          if (xb > cx1) { xb = cx1; }
+          prv_fill_span(fb, w, y, xa, xb, &sh);
+        }
+      }
+    }
+  }
+}
+
 static void prv_fill_pattern(wasm_exec_env_t env, wasm_obj_t fb, int32_t offset, int32_t len,
                              int32_t b0, int32_t b1, int32_t b2, int32_t b3, int32_t phase) {
   if (!prv_fill_bounds(fb, &offset, &len, "fillPattern")) return;
@@ -1140,6 +1244,7 @@ static NativeSymbol s_dart_natives[] = {
     {"f64ToFixed", prv_f64_to_fixed, "(Fi)r"},
     {"randomInt", prv_random_int, "()I"},
     {"fillPattern", prv_fill_pattern, "(riiiiiii)"},
+    {"fillPath", prv_fill_path, "(rrr)"},
     {"blendFill", prv_blend_fill, "(riiiii)"},
     /* Flutter framework natives (ported from the host harness) */
     {"timelineStreamEnabled", prv_timeline_stream_enabled, "()i"},
