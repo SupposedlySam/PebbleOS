@@ -26,6 +26,12 @@ void wamr_pebble_bind_exec_env_to_current_task(void *exec_env);
 //! call that can run wasm or GC. @param array_obj a wasm_array_obj_t.
 const uint8_t *wamr_pebble_array_u8_data(void *array_obj);
 
+//! Raw element storage of a WasmGC array of ANY element type (f64/i32/...),
+//! for callers that reinterpret it (e.g. WasmArray<WasmF64> as double*). Same
+//! rooting/lifetime rules as wamr_pebble_array_u8_data. @param array_obj a
+//! wasm_array_obj_t. Returns NULL only if array_obj is NULL.
+const void *wamr_pebble_array_raw_data(void *array_obj);
+
 //! DIAG (throwaway, INV2): GC crash hunt. Register a callback that receives a
 //! short phase name at each GC phase boundary (rootset/mark/sweep), and force
 //! an immediate collection of a module instance's GC heap. Remove when the

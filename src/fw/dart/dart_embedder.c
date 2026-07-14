@@ -1142,9 +1142,12 @@ static inline void prv_fill_span(uint8_t *fb, int w, int y, int xa, int xb, cons
 static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts_obj,
                           wasm_obj_t meta_obj) {
   (void)env;
+  // fb is a WasmArray<WasmI8> (1-byte elems); pts/meta are WasmArray<WasmF64>/
+  // <WasmI32>, so they need the ANY-elem-size accessor -- wamr_pebble_array_u8_data
+  // returns NULL for non-u8 arrays, which silently no-op'd every path fill.
   uint8_t *fb = (uint8_t *)wamr_pebble_array_u8_data(fb_obj);
-  const double *pts = (const double *)wamr_pebble_array_u8_data(pts_obj);
-  const int32_t *meta = (const int32_t *)wamr_pebble_array_u8_data(meta_obj);
+  const double *pts = (const double *)wamr_pebble_array_raw_data(pts_obj);
+  const int32_t *meta = (const int32_t *)wamr_pebble_array_raw_data(meta_obj);
   if (!fb || !pts || !meta) return;
   int w = meta[0], h = meta[1], nsub = meta[2], argb = meta[3], even_odd = meta[4];
   int cx0 = meta[5], cy0 = meta[6], cx1 = meta[7], cy1 = meta[8];

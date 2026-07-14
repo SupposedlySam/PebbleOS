@@ -64,6 +64,19 @@ wamr_pebble_array_u8_data(void *array_obj)
     return (const uint8_t *)wasm_array_obj_first_elem_addr(arr);
 }
 
+/* Raw element storage of a WasmGC array of ANY element type (f64/i32/i8/...).
+   Unlike wamr_pebble_array_u8_data this does NOT require 1-byte elements, so a
+   caller can read a WasmArray<WasmF64> as a double pointer, etc. */
+const void *
+wamr_pebble_array_raw_data(void *array_obj)
+{
+    WASMArrayObjectRef arr = (WASMArrayObjectRef)array_obj;
+    if (!arr) {
+        return NULL;
+    }
+    return (const void *)wasm_array_obj_first_elem_addr(arr);
+}
+
 /* ---- lifecycle ---- */
 
 int
