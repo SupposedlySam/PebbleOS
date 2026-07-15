@@ -5,6 +5,7 @@
 #include "dart_embedder.h"
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
+#include "wasm_aotsmoke_module.h"
 /* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
    partition (fw is ~2.07MB), so it is NOT embedded in .text -- it ships in the
    resource pack (resources/normal/obelix/resource_map.json FLUTTER_COUNTER_WASM,
@@ -990,6 +991,89 @@ void command_dart_wasm(void) {
   char buf[64];
   prompt_send_response_fmt(buf, sizeof(buf), "dart: wasm smoketest %s",
                            ok ? "OK (add(40,2)=42)" : "FAILED");
+}
+
+//! AOT smoke test: load + run a tiny NATIVE-ARM .aot (wamrc output) end-to-end.
+//! Validates the on-device AOT path -- loader + thumb relocs + executable memory
+//! (SRAM here; the module is 488B) + I/D-cache coherency -- independent of the
+//! multi-MB size problem. run() returns 20+22=42. Same step-markers as the wasm
+//! smoketest so a hard fault names the dead stage in the flash log.
+bool dart_run_aot_smoketest(void) {
+  char error_buf[128];
+  uint8_t *buf = NULL;
+  wasm_module_t module = NULL;
+  wasm_module_inst_t inst = NULL;
+  wasm_exec_env_t exec_env = NULL;
+  bool ok = false;
+
+  PBL_LOG_ALWAYS("dart: aot [1] init");
+  if (!dart_runtime_init()) {
+    return false;
+  }
+  PBL_LOG_ALWAYS("dart: aot [2] malloc %u", (unsigned)g_aotsmoke_module_size);
+  buf = (uint8_t *)wasm_runtime_malloc(g_aotsmoke_module_size);
+  if (!buf) {
+    PBL_LOG_ERR("dart: aot no RAM");
+    return false;
+  }
+  memcpy(buf, g_aotsmoke_module, g_aotsmoke_module_size);
+
+  // wasm_runtime_load auto-detects .aot (magic "\0aot") -> the AOT loader: mmap
+  // the text, apply thumb relocations, dcache-flush + icache-invalidate.
+  PBL_LOG_ALWAYS("dart: aot [3] load (.aot)");
+  module = wasm_runtime_load(buf, g_aotsmoke_module_size, error_buf,
+                             sizeof(error_buf));
+  if (!module) {
+    PBL_LOG_ERR("dart: aot load failed: %s", error_buf);
+    goto done;
+  }
+  PBL_LOG_ALWAYS("dart: aot [4] instantiate");
+  inst = wasm_runtime_instantiate(module, 8 * 1024, 8 * 1024, error_buf,
+                                  sizeof(error_buf));
+  if (!inst) {
+    PBL_LOG_ERR("dart: aot instantiate failed: %s", error_buf);
+    goto done;
+  }
+  PBL_LOG_ALWAYS("dart: aot [5] exec_env");
+  exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
+  wasm_function_inst_t run_func = wasm_runtime_lookup_function(inst, "run");
+  if (!run_func) {
+    PBL_LOG_ERR("dart: aot no 'run' export");
+    goto done;
+  }
+  // First on-device execution of native-ARM AOT code.
+  PBL_LOG_ALWAYS("dart: aot [6] call run() -- executing native code");
+  uint32_t argv[1] = {0};
+  if (!wasm_runtime_call_wasm(exec_env, run_func, 0, argv)) {
+    PBL_LOG_ERR("dart: aot trap: %s", wasm_runtime_get_exception(inst));
+    goto done;
+  }
+  PBL_LOG_ALWAYS("dart: AOT smoketest run()=%u %s", (unsigned)argv[0],
+                 argv[0] == 42 ? "OK" : "WRONG");
+  ok = (argv[0] == 42);
+
+done:
+  if (exec_env) {
+    wasm_runtime_destroy_exec_env(exec_env);
+  }
+  if (inst) {
+    wasm_runtime_deinstantiate(inst);
+  }
+  if (module) {
+    wasm_runtime_unload(module);
+  }
+  if (buf) {
+    wasm_runtime_free(buf);
+  }
+  return ok;
+}
+
+//! Console command: `dart aot` runs the native-ARM AOT smoke test.
+void command_dart_aot(void) {
+  bool ok = dart_run_aot_smoketest();
+  char buf[64];
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: AOT smoketest %s",
+                           ok ? "OK (native run()=42)" : "FAILED");
 }
 
 /* Stepped smoke test for the on-screen diagnostic app. Each WAMR stage runs in

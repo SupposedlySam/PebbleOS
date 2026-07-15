@@ -298,6 +298,7 @@ extern void command_log_ring_dump(void);
 #ifdef CONFIG_DART_RUNTIME
 extern void command_dart_test(void);
 extern void command_dart_wasm(void);
+extern void command_dart_aot(void);
 extern void command_dart_flutter(void);
 extern void command_dart_tap(void);
 extern void command_dart_status(void);
@@ -323,6 +324,7 @@ static const Command s_prompt_commands[] = {
 #ifdef CONFIG_DART_RUNTIME
   { "dart test", command_dart_test, 0 },
   { "dart wasm", command_dart_wasm, 0 },
+  { "dart aot", command_dart_aot, 0 },
   { "dart flutter", command_dart_flutter, 0 },
   { "dart tapat", command_dart_tapat, 2 },
   { "dart tap", command_dart_tap, 0 },
