@@ -6,6 +6,7 @@
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
 #include "wasm_aotsmoke_module.h"
+#include "applib/vendor/tinflate/tinflate.h"
 /* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
    partition (fw is ~2.07MB), so it is NOT embedded in .text -- it ships in the
    resource pack (resources/normal/obelix/resource_map.json FLUTTER_COUNTER_WASM,
@@ -675,6 +676,39 @@ static uint8_t *prv_load_pfs_module(uint32_t *size_out) {
     return NULL;
   }
   PBL_LOG_ALWAYS("dart: loading PUSHED module from PFS (%u bytes)", (unsigned)sz);
+
+  /* Compressed-module container so a large .aot can be delivered over BLE
+     without hitting the ~5MB PutBytes/PPoG wedge: "DFL0" + uncompressed_size
+     (u32 LE) + a raw DEFLATE stream. A native-ARM .aot is ~6.4MB but deflates
+     ~3x (~2.3MB). Inflate here into a fresh pool buffer (PSRAM) before the
+     loader sees it; the loader's own magic ("\0aot"/"\0asm") is unchanged. A
+     module without this header is passed through as-is. */
+  if (sz >= 8 && buf[0] == 'D' && buf[1] == 'F' && buf[2] == 'L'
+      && buf[3] == '0') {
+    uint32_t ulen;
+    memcpy(&ulen, buf + 4, sizeof(ulen)); /* little-endian */
+    uint8_t *out = ulen ? (uint8_t *)wasm_runtime_malloc(ulen) : NULL;
+    if (!out) {
+      wasm_runtime_free(buf);
+      snprintf(s_module_fail, sizeof(s_module_fail),
+               "no RAM for %u-byte inflated module", (unsigned)ulen);
+      return NULL;
+    }
+    unsigned int outlen = ulen;
+    int rc = tinflate_uncompress(out, &outlen, buf + 8, (unsigned int)(sz - 8));
+    wasm_runtime_free(buf); /* done with the compressed copy */
+    if (rc != TINF_OK || outlen != ulen) {
+      wasm_runtime_free(out);
+      snprintf(s_module_fail, sizeof(s_module_fail),
+               "inflate failed rc=%d %u/%u", rc, outlen, (unsigned)ulen);
+      return NULL;
+    }
+    PBL_LOG_ALWAYS("dart: inflated pushed module %u -> %u bytes", (unsigned)sz,
+                   (unsigned)ulen);
+    *size_out = ulen;
+    return out;
+  }
+
   *size_out = (uint32_t)sz;
   return buf;
 }
