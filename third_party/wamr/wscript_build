@@ -76,6 +76,14 @@ if bld.env.CONFIG_DART_RUNTIME:
         'WASM_ENABLE_REF_TYPES=1',
         'WASM_ENABLE_AOT=1',
         'WASM_ENABLE_AOT_INTRINSICS=1',
+        # GC AOT (wamrc --enable-gc) pins STANDARD stack frames and, via dart2wasm's
+        # return_call, emits a real call to the runtime aot_alloc_frame. That symbol is
+        # only registered (aot_reloc.h REG_AOT_TRACE_SYM) and its implementation compiled
+        # (aot_runtime.c) under this define -- without it the .aot fails to load with
+        # "resolve symbol aot_alloc_frame failed". It is also REQUIRED for GC correctness:
+        # the root scanner (aot_frame_traverse_gc_rootset) walks these frames' frame_ref
+        # maps to find live roots; no frames => roots missed => heap corruption.
+        'WASM_ENABLE_AOT_STACK_FRAME=1',
         'WASM_ENABLE_JIT=0',
         'WASM_ENABLE_LIBC_BUILTIN=0',
         'WASM_ENABLE_LIBC_WASI=0',
