@@ -301,6 +301,7 @@ extern void command_dart_wasm(void);
 extern void command_dart_aot(void);
 extern void command_dart_aotflash(void);
 extern void command_dart_flashchunk(const char *offset_str);
+extern void command_dart_flashfin(const char *len_str);
 extern void command_dart_flutter(void);
 extern void command_dart_tap(void);
 extern void command_dart_status(void);
@@ -329,6 +330,7 @@ static const Command s_prompt_commands[] = {
   { "dart aot", command_dart_aot, 0 },
   { "dart aotflash", command_dart_aotflash, 0 },
   { "dart flashchunk", command_dart_flashchunk, 1 },
+  { "dart flashfin", command_dart_flashfin, 1 },
   { "dart flutter", command_dart_flutter, 0 },
   { "dart tapat", command_dart_tapat, 2 },
   { "dart tap", command_dart_tap, 0 },

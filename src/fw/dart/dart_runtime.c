@@ -671,6 +671,12 @@ void command_dart_test(void) {
 //! needs no firmware flash: push, `dart reload`, done.
 #define DART_PFS_MODULE "flutter_app.wasm"
 
+//! Metadata footer for a flash-resident XIP module: "DAOT" + a u32 true .aot byte
+//! length, written by `dart flashfin` into the LAST subsector of DART_MODULE (well
+//! past the module's bytes). Gates the flash-load path and gives wasm_runtime_load
+//! the EXACT length -- walking the AOT section list into erased flash mis-parses.
+#define DART_FLASH_META_ADDR (FLASH_REGION_DART_MODULE_END - SUBSECTOR_SIZE_BYTES)
+
 //! Load a pushed module from PFS into a pool buffer, or NULL if none exists.
 //!
 //! Compressed-module container so a large .aot can be delivered over BLE without
@@ -782,20 +788,31 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
     return pushed;
   }
   /* XIP-from-flash: a large .aot materialized into the DART_MODULE flash region
-     (via `dart flashchunk`) executes IN-PLACE from flash -- its native text (e.g.
-     the ~11.7MB of the stock Material counter) is too big to sit in the PSRAM
-     pool. An --xip (indirect-mode) .aot has no text relocations, so the WAMR
+     (via `dart flashchunk` + `dart flashfin`) executes IN-PLACE from flash -- its
+     native text (~11.7MB for the stock Material counter) is too big to sit in the
+     PSRAM pool. An --xip (indirect-mode) .aot has no text relocations, so the WAMR
      loader points module->code straight at this read-only flash mapping and never
-     copies or frees it (proven by dart_run_aot_flash_smoketest). Detect by the AOT
-     magic ("\0aot") at the region base; pass the whole region size (the loader
-     bounds every read to each section's declared size). */
+     copies or frees it (proven by dart_run_aot_flash_smoketest).
+     Gated on the "DAOT" footer (written by `dart flashfin` after the LAST chunk)
+     AND the AOT magic at the base: this ignores a leftover smoke or a partial
+     delivery, and -- critically -- supplies the EXACT .aot length. Passing the
+     whole region size instead makes the loader's top-level section walk run off
+     the module's end into erased (0xFF) flash and fail with "invalid section id",
+     so the length must be exact. */
   const uint8_t *flashmod = (const uint8_t *)FLASH_REGION_DART_MODULE_BEGIN;
-  if (flashmod[0] == 0 && flashmod[1] == 'a' && flashmod[2] == 'o'
+  const uint8_t *meta = (const uint8_t *)DART_FLASH_META_ADDR;
+  if (meta[0] == 'D' && meta[1] == 'A' && meta[2] == 'O' && meta[3] == 'T'
+      && flashmod[0] == 0 && flashmod[1] == 'a' && flashmod[2] == 'o'
       && flashmod[3] == 't') {
-    PBL_LOG_ALWAYS("dart: loading XIP module IN-PLACE from FLASH @0x%08lx",
-                   (unsigned long)FLASH_REGION_DART_MODULE_BEGIN);
-    *size_out = FLASH_REGION_DART_MODULE_END - FLASH_REGION_DART_MODULE_BEGIN;
-    return (uint8_t *)flashmod;
+    uint32_t len;
+    memcpy(&len, meta + 4, sizeof(len));
+    uint32_t maxlen = DART_FLASH_META_ADDR - FLASH_REGION_DART_MODULE_BEGIN;
+    if (len > 0 && len <= maxlen) {
+      PBL_LOG_ALWAYS("dart: loading XIP module IN-PLACE from FLASH @0x%08lx (%u B)",
+                     (unsigned long)FLASH_REGION_DART_MODULE_BEGIN, (unsigned)len);
+      *size_out = len;
+      return (uint8_t *)flashmod;
+    }
   }
   size_t sz = resource_size(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM);
   if (sz == 0) {
@@ -940,7 +957,7 @@ static void prv_precache_cb(void *unused) {
   }
   prv_app_lock();
   if (s_app_module) { /* raced an app launch; it won */
-    wasm_runtime_free(buf);
+    if (!prv_app_buf_is_flash(buf)) { wasm_runtime_free(buf); }
     prv_app_unlock();
     return;
   }
@@ -950,7 +967,7 @@ static void prv_precache_cb(void *unused) {
   s_app_module = wasm_runtime_load(s_app_buf, size, error_buf, sizeof(error_buf));
   task_watchdog_resume();
   if (!s_app_module) {
-    wasm_runtime_free(s_app_buf);
+    if (!prv_app_buf_is_flash(s_app_buf)) { wasm_runtime_free(s_app_buf); }
     s_app_buf = NULL;
     PBL_LOG_ALWAYS("dart precache: parse failed: %s", error_buf);
   } else {
@@ -1284,6 +1301,12 @@ void command_dart_flashchunk(const char *offset_str) {
     return;
   }
   uint32_t offset = offset_str ? (uint32_t)strtoul(offset_str, NULL, 0) : 0;
+  /* Offsets MUST be subsector-aligned: flashchunk erases the subsectors it covers,
+     so a misaligned offset would let chunk i+1's erase wipe chunk i's tail. */
+  if (offset & ((uint32_t)SUBSECTOR_SIZE_BYTES - 1)) {
+    prompt_send_response("dart: flashchunk offset not 4KB-aligned");
+    return;
+  }
   uint32_t len = 0;
   uint8_t *data = prv_load_pfs_module(&len); /* reads + DFL0-decompresses the chunk */
   if (!data) {
@@ -1310,6 +1333,32 @@ void command_dart_flashchunk(const char *offset_str) {
   prompt_send_response_fmt(buf, sizeof(buf),
                            "dart: flashchunk OK (%u bytes @off %u)", (unsigned)len,
                            (unsigned)offset);
+}
+
+//! Console command: `dart flashfin <length>` -- finalize a chunked flash delivery.
+//! Writes the "DAOT" footer + the true .aot byte length into DART_MODULE's last
+//! subsector. prv_load_flutter_module requires this footer (and uses the length)
+//! before executing the module in place, so it MUST be sent after the last
+//! flashchunk -- until then a half-delivered region is correctly ignored.
+void command_dart_flashfin(const char *len_str) {
+  char buf[80];
+  uint32_t len = len_str ? (uint32_t)strtoul(len_str, NULL, 0) : 0;
+  uint32_t maxlen = DART_FLASH_META_ADDR - FLASH_REGION_DART_MODULE_BEGIN;
+  if (len == 0 || len > maxlen) {
+    prompt_send_response("dart: flashfin bad length");
+    return;
+  }
+  uint8_t footer[8] = {'D', 'A', 'O', 'T', 0, 0, 0, 0};
+  memcpy(footer + 4, &len, sizeof(len));
+  flash_region_erase_optimal_range_no_watchdog(
+      DART_FLASH_META_ADDR, DART_FLASH_META_ADDR,
+      DART_FLASH_META_ADDR + SUBSECTOR_SIZE_BYTES,
+      DART_FLASH_META_ADDR + SUBSECTOR_SIZE_BYTES);
+  flash_write_bytes(footer, DART_FLASH_META_ADDR, sizeof(footer));
+  PBL_LOG_ALWAYS("dart: flashfin footer len=%u @0x%08lx", (unsigned)len,
+                 (unsigned long)DART_FLASH_META_ADDR);
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: flashfin OK (len %u)",
+                           (unsigned)len);
 }
 
 /* Stepped smoke test for the on-screen diagnostic app. Each WAMR stage runs in
