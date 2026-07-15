@@ -284,7 +284,7 @@ void sf32lb52_psram_powerdown(void) {
   // Invalidate (not clean: the die's contents are garbage after the rail cut
   // anyway, and writing to a dying die is the exact hazard).
   __DSB();
-  SCB_InvalidateDCache_by_Addr((void *)PSRAM_TEST_BASE, 13 * 1024 * 1024);
+  SCB_InvalidateDCache_by_Addr((void *)PSRAM_TEST_BASE, 15 * 1024 * 1024);
   __DSB();
   __ISB();
   if (s_psram_ready) {
@@ -539,7 +539,7 @@ static void prv_psram_diag(uint16_t div, PsramEmitFn emit) {
       // 2MB, leaving the GC heap + big allocations in UNVERIFIED memory --
       // random-access GC sweeps up there corrupted pointers (the tap-crash
       // family). Verify what will actually be used.
-      const uint32_t SPAN = 13u * 1024u * 1024u;  // == dart_runtime_pool size
+      const uint32_t SPAN = 15u * 1024u * 1024u;  // == dart_runtime_pool size (15MB of 16MB physical)
       // ISOLATION run (no margin sweep): gate at the cal's UNTOUCHED tap. The margin DQS sweep was
       // removed as the prime suspect -- perturbing DQS then restoring MISCR may not fully recover the
       // strobe, which would fail the gate spuriously. This run answers one question: does the

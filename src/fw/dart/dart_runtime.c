@@ -123,7 +123,11 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
     // while the verify gated only 2MB, so the GC heap lived in unverified
     // PSRAM -- random-access sweeps there corrupted pointers (tap crashes).
     uint32_t verified = sf32lb52_psram_verified_bytes();
-    uint32_t want = 13u * 1024u * 1024u;
+    /* 15MB of the 16MB physical PSRAM (was 13MB). The native-ARM .aot is ~6.4MB
+       resident (vs the 1.1MB .wasm), so the interp-era 13MB pool OOMs aot_load's
+       metadata. Gated by the verify: *size = min(verified, want), so if 15MB
+       doesn't verify clean the pool falls back to whatever did. */
+    uint32_t want = 15u * 1024u * 1024u;
     *size = verified && verified < want ? verified : want;
     return true;
   }
