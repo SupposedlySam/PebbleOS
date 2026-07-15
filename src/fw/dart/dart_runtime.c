@@ -6,7 +6,10 @@
 #include "dart_test_module.h"
 #include "wasm_smoketest_module.h"
 #include "wasm_aotsmoke_module.h"
+#include "wasm_aotsmoke_xip_module.h"
 #include "applib/vendor/tinflate/tinflate.h"
+#include "drivers/flash.h"
+#include "flash_region/flash_region.h"
 /* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
    partition (fw is ~2.07MB), so it is NOT embedded in .text -- it ships in the
    resource pack (resources/normal/obelix/resource_map.json FLUTTER_COUNTER_WASM,
@@ -362,11 +365,22 @@ static bool prv_app_has_cached_module(void) {
   return cached;
 }
 
+//! True if `p` points into the DART_MODULE flash region. An XIP module executes
+//! IN-PLACE from that read-only flash mapping, so its "buffer" is not a PSRAM pool
+//! allocation and must never be handed to wasm_runtime_free.
+static bool prv_app_buf_is_flash(const uint8_t *p) {
+  return (uintptr_t)p >= FLASH_REGION_DART_MODULE_BEGIN
+         && (uintptr_t)p < FLASH_REGION_DART_MODULE_END;
+}
+
 //! Drop the cached parsed module too (full teardown; e.g. before loading a
 //! DIFFERENT module). Caller must hold s_app_mutex.
 static void prv_app_unload_module_locked(void) {
   if (s_app_module) { wasm_runtime_unload(s_app_module); s_app_module = NULL; }
-  if (s_app_buf) { wasm_runtime_free(s_app_buf); s_app_buf = NULL; }
+  if (s_app_buf) {
+    if (!prv_app_buf_is_flash(s_app_buf)) { wasm_runtime_free(s_app_buf); }
+    s_app_buf = NULL;
+  }
 }
 
 //! Tear the whole Dart runtime down so PSRAM can be POWERED OFF: the WAMR
@@ -399,7 +413,7 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     prv_app_stop_locked(); /* one resident app at a time */
   }
   if (!dart_runtime_init()) {
-    if (wasm_buf) wasm_runtime_free(wasm_buf);
+    if (wasm_buf && !prv_app_buf_is_flash(wasm_buf)) wasm_runtime_free(wasm_buf);
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     prv_app_unlock();
     return false;
@@ -766,6 +780,22 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   uint8_t *pushed = prv_load_pfs_module(size_out);
   if (pushed) {
     return pushed;
+  }
+  /* XIP-from-flash: a large .aot materialized into the DART_MODULE flash region
+     (via `dart flashchunk`) executes IN-PLACE from flash -- its native text (e.g.
+     the ~11.7MB of the stock Material counter) is too big to sit in the PSRAM
+     pool. An --xip (indirect-mode) .aot has no text relocations, so the WAMR
+     loader points module->code straight at this read-only flash mapping and never
+     copies or frees it (proven by dart_run_aot_flash_smoketest). Detect by the AOT
+     magic ("\0aot") at the region base; pass the whole region size (the loader
+     bounds every read to each section's declared size). */
+  const uint8_t *flashmod = (const uint8_t *)FLASH_REGION_DART_MODULE_BEGIN;
+  if (flashmod[0] == 0 && flashmod[1] == 'a' && flashmod[2] == 'o'
+      && flashmod[3] == 't') {
+    PBL_LOG_ALWAYS("dart: loading XIP module IN-PLACE from FLASH @0x%08lx",
+                   (unsigned long)FLASH_REGION_DART_MODULE_BEGIN);
+    *size_out = FLASH_REGION_DART_MODULE_END - FLASH_REGION_DART_MODULE_BEGIN;
+    return (uint8_t *)flashmod;
   }
   size_t sz = resource_size(SYSTEM_APP, RESOURCE_ID_FLUTTER_COUNTER_WASM);
   if (sz == 0) {
@@ -1152,6 +1182,134 @@ void command_dart_aot(void) {
   char buf[64];
   prompt_send_response_fmt(buf, sizeof(buf), "dart: AOT smoketest %s",
                            ok ? "OK (native run()=42)" : "FAILED");
+}
+
+//! Validate that WAMR-compiled code executes IN-PLACE from the XIP FLASH mapping
+//! (the DART_MODULE region), not just from a PSRAM pool buffer. This is the load-
+//! bearing step for running a 14MB Material .aot whose text is too big for PSRAM:
+//! an --xip (indirect-mode) .aot has no text relocations, so its code can live in
+//! read-only flash and WAMR points module->code straight at it (no copy). Here we
+//! erase one subsector of DART_MODULE, write the tiny XIP smoke there, then load
+//! DIRECTLY from the flash XIP address and run() -- expecting 42.
+bool dart_run_aot_flash_smoketest(void) {
+  char error_buf[128];
+  wasm_module_t module = NULL;
+  wasm_module_inst_t inst = NULL;
+  wasm_exec_env_t exec_env = NULL;
+  bool ok = false;
+
+  if (!dart_runtime_init()) {
+    return false;
+  }
+
+  const uint32_t region = FLASH_REGION_DART_MODULE_BEGIN;
+  PBL_LOG_ALWAYS("dart: aotflash [1] erase DART_MODULE subsector @0x%08lx",
+                 (unsigned long)region);
+  /* One subsector is plenty for the tiny module; the erase feeds the watchdog. */
+  flash_region_erase_optimal_range(region, region, region + SUBSECTOR_SIZE_BYTES,
+                                   region + SUBSECTOR_SIZE_BYTES);
+  PBL_LOG_ALWAYS("dart: aotflash [2] write %u bytes -> flash",
+                 (unsigned)g_aotsmoke_xip_module_size);
+  flash_write_bytes(g_aotsmoke_xip_module, region, g_aotsmoke_xip_module_size);
+  /* The qspi driver invalidates I/D-cache over the written range, so the freshly
+     written flash is coherent for execution. */
+
+  /* Load DIRECTLY from the flash XIP address -- NOT a pool buffer. For an XIP
+     (indirect-mode) .aot the loader keeps module->code pointing here (no copy). */
+  PBL_LOG_ALWAYS("dart: aotflash [3] load FROM FLASH @0x%08lx", (unsigned long)region);
+  module = wasm_runtime_load((uint8_t *)region, g_aotsmoke_xip_module_size, error_buf,
+                             sizeof(error_buf));
+  if (!module) {
+    PBL_LOG_ERR("dart: aotflash load failed: %s", error_buf);
+    goto done;
+  }
+  inst = wasm_runtime_instantiate(module, 8 * 1024, 8 * 1024, error_buf,
+                                  sizeof(error_buf));
+  if (!inst) {
+    PBL_LOG_ERR("dart: aotflash instantiate failed: %s", error_buf);
+    goto done;
+  }
+  exec_env = wasm_runtime_create_exec_env(inst, 8 * 1024);
+  wasm_function_inst_t run_func = wasm_runtime_lookup_function(inst, "run");
+  if (!run_func) {
+    PBL_LOG_ERR("dart: aotflash no 'run' export");
+    goto done;
+  }
+  PBL_LOG_ALWAYS("dart: aotflash [4] call run() -- EXECUTING FROM FLASH XIP");
+  uint32_t argv[1] = {0};
+  if (!wasm_runtime_call_wasm(exec_env, run_func, 0, argv)) {
+    PBL_LOG_ERR("dart: aotflash trap: %s", wasm_runtime_get_exception(inst));
+    goto done;
+  }
+  PBL_LOG_ALWAYS("dart: AOTFLASH run()=%u %s", (unsigned)argv[0],
+                 argv[0] == 42 ? "OK" : "WRONG");
+  ok = (argv[0] == 42);
+
+done:
+  if (exec_env) {
+    wasm_runtime_destroy_exec_env(exec_env);
+  }
+  if (inst) {
+    wasm_runtime_deinstantiate(inst);
+  }
+  if (module) {
+    wasm_runtime_unload(module);
+  }
+  /* NOTE: module->code was in flash, never a pool allocation -- nothing to free. */
+  return ok;
+}
+
+//! Console command: `dart aotflash` -- prove native AOT executes from XIP flash.
+void command_dart_aotflash(void) {
+  bool ok = dart_run_aot_flash_smoketest();
+  char buf[80];
+  prompt_send_response_fmt(buf, sizeof(buf), "dart: AOTFLASH (XIP-from-flash) %s",
+                           ok ? "OK (native run()=42 from flash)" : "FAILED");
+}
+
+//! Console command: `dart flashchunk <hex-offset>` -- materialize one slice of a
+//! large XIP .aot into the DART_MODULE flash region. A 13MB+ .aot can't sit in the
+//! PSRAM pool and a single 13MB BLE PutBytes wedges PPoG, so the host streams it
+//! in aligned chunks: push chunk i (DFL0-compressed) to PFS `flutter_app.wasm`,
+//! then `dart flashchunk <i*chunkbytes>`. We decompress it (fits PSRAM), erase the
+//! subsectors it covers, write it at DART_MODULE_BEGIN+offset, and delete the PFS
+//! file (so the small-module PFS path stays clean). Chunk offset+size must be
+//! 4KB-aligned except the final short chunk, so chunks never share a subsector.
+//! After the last chunk the .aot is contiguous in XIP flash and `dart flutter`
+//! executes it in place (see prv_load_flutter_module's flash branch).
+void command_dart_flashchunk(const char *offset_str) {
+  char buf[96];
+  if (!dart_runtime_init()) {
+    prompt_send_response("dart: flashchunk runtime init failed");
+    return;
+  }
+  uint32_t offset = offset_str ? (uint32_t)strtoul(offset_str, NULL, 0) : 0;
+  uint32_t len = 0;
+  uint8_t *data = prv_load_pfs_module(&len); /* reads + DFL0-decompresses the chunk */
+  if (!data) {
+    prompt_send_response_fmt(buf, sizeof(buf), "dart: flashchunk no chunk (%s)",
+                             s_module_fail);
+    return;
+  }
+  uint32_t dst = FLASH_REGION_DART_MODULE_BEGIN + offset;
+  if (dst + len > FLASH_REGION_DART_MODULE_END) {
+    wasm_runtime_free(data);
+    prompt_send_response("dart: flashchunk OUT OF RANGE");
+    return;
+  }
+  uint32_t estart = dst & ~((uint32_t)SUBSECTOR_SIZE_BYTES - 1);
+  uint32_t eend = (dst + len + SUBSECTOR_SIZE_BYTES - 1)
+                  & ~((uint32_t)SUBSECTOR_SIZE_BYTES - 1);
+  PBL_LOG_ALWAYS("dart: flashchunk off %u len %u erase[0x%08lx-0x%08lx) w@0x%08lx",
+                 (unsigned)offset, (unsigned)len, (unsigned long)estart,
+                 (unsigned long)eend, (unsigned long)dst);
+  flash_region_erase_optimal_range_no_watchdog(estart, estart, eend, eend);
+  flash_write_bytes(data, dst, len);
+  wasm_runtime_free(data);
+  pfs_remove(DART_PFS_MODULE); /* consume so the PFS small-module path stays clean */
+  prompt_send_response_fmt(buf, sizeof(buf),
+                           "dart: flashchunk OK (%u bytes @off %u)", (unsigned)len,
+                           (unsigned)offset);
 }
 
 /* Stepped smoke test for the on-screen diagnostic app. Each WAMR stage runs in
