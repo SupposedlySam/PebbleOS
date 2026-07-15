@@ -115,14 +115,30 @@ os_mmap(void *hint, size_t size, int prot, int flags, os_file_handle file)
     (void)prot;
     (void)flags;
     (void)file;
-    return kernel_malloc(size);
+    /* The AOT loader mmaps the native text here. It can be multiple MB -- far
+       beyond the SRAM kernel heap -- so draw from the WAMR pool, which on obelix
+       is PSRAM @0x60000000 (13MB; see dart_runtime_pool). That region is cached
+       and executable (not MPU-XN); os_icache_flush/os_dcache_flush keep it
+       coherent after the loader writes code. Falls back to the kernel heap only
+       if the runtime allocator isn't up yet (never on the AOT load path, which
+       runs after dart_runtime_init). Freed symmetrically in os_munmap. */
+    void *p = wasm_runtime_malloc((uint32)size);
+    return p ? p : kernel_malloc(size);
 }
 
 void
 os_munmap(void *addr, size_t size)
 {
     (void)size;
-    kernel_free(addr);
+    /* Symmetric with os_mmap: the pool allocation lives at 0x6xxxxxxx (PSRAM);
+       the kernel-heap fallback elsewhere. wasm_runtime_free would corrupt the
+       kernel heap and vice-versa, so route by address. */
+    if ((uintptr_t)addr >= 0x60000000u && (uintptr_t)addr < 0x70000000u) {
+        wasm_runtime_free(addr);
+    }
+    else {
+        kernel_free(addr);
+    }
 }
 
 int
