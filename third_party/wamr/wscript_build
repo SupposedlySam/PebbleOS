@@ -24,6 +24,13 @@ if bld.env.CONFIG_DART_RUNTIME:
         core + '/iwasm/interpreter/wasm_interp_classic.c',
         core + '/iwasm/interpreter/wasm_loader.c',
         core + '/iwasm/interpreter/wasm_runtime.c',
+        # AOT runtime: load + execute native-ARM .aot (wamrc output) alongside the
+        # interpreter (dual mode -- the runtime picks by magic bytes). aot_reloc_thumb
+        # applies the non-XIP thumb relocations at load time.
+        core + '/iwasm/aot/aot_loader.c',
+        core + '/iwasm/aot/aot_runtime.c',
+        core + '/iwasm/aot/aot_intrinsic.c',
+        core + '/iwasm/aot/arch/aot_reloc_thumb.c',
         core + '/shared/mem-alloc/ems/ems_alloc.c',
         core + '/shared/mem-alloc/ems/ems_gc.c',
         core + '/shared/mem-alloc/ems/ems_hmu.c',
@@ -67,7 +74,8 @@ if bld.env.CONFIG_DART_RUNTIME:
         'WASM_ENABLE_TAIL_CALL=1',
         'WASM_ENABLE_BULK_MEMORY=1',
         'WASM_ENABLE_REF_TYPES=1',
-        'WASM_ENABLE_AOT=0',
+        'WASM_ENABLE_AOT=1',
+        'WASM_ENABLE_AOT_INTRINSICS=1',
         'WASM_ENABLE_JIT=0',
         'WASM_ENABLE_LIBC_BUILTIN=0',
         'WASM_ENABLE_LIBC_WASI=0',
@@ -88,6 +96,7 @@ if bld.env.CONFIG_DART_RUNTIME:
         core + '/iwasm/common',
         core + '/iwasm/common/gc',
         core + '/iwasm/interpreter',
+        core + '/iwasm/aot',
         core + '/iwasm/libraries/libc-builtin',
         core + '/shared/mem-alloc',
         core + '/shared/utils',

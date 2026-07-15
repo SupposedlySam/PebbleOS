@@ -204,3 +204,17 @@ DART_WEAK int isxdigit(int c) {
    never reached - our natives use the simple NativeSymbol ABI, not wasm_func_t.
    Stub the one C-API symbol it references so the link resolves. */
 void wasm_trap_delete(void *trap) { (void)trap; }
+
+/* newlib (freestanding) omits the double fmin/fmax; the AOT reloc symbol table
+   (aot_reloc.h) references them so they must link. Weak: a real libm wins if
+   present. NaN handling per C99 (return the non-NaN operand). */
+DART_WEAK double fmin(double a, double b) {
+  if (a != a) return b;
+  if (b != b) return a;
+  return a < b ? a : b;
+}
+DART_WEAK double fmax(double a, double b) {
+  if (a != a) return b;
+  if (b != b) return a;
+  return a > b ? a : b;
+}

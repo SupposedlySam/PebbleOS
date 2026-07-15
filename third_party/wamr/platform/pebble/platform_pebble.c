@@ -16,6 +16,7 @@
 #include "os/tick.h"
 #include "kernel/pbl_malloc.h"
 #include "console/dbgserial.h"
+#include "mcu/cache.h"
 
 #include "wasm_runtime.h"
 
@@ -131,6 +132,23 @@ os_mprotect(void *addr, size_t size, int prot)
     (void)size;
     (void)prot;
     return 0; /* no MMU/MPU page protection for the wasm heap */
+}
+
+/* AOT cache coherency: after the loader writes native code into (cacheable)
+   memory, the D-cache holds the code but the I-cache/prefetch may still see
+   stale bytes. os_dcache_flush writes the code back to memory; os_icache_flush
+   invalidates the I-cache for the code region so the CPU fetches it fresh.
+   (Cortex-M33 has split I/D caches -- see mcu/cache.h.) */
+void
+os_dcache_flush(void)
+{
+    dcache_flush_all();
+}
+
+void
+os_icache_flush(void *start, size_t len)
+{
+    icache_invalidate(start, len);
 }
 
 void *

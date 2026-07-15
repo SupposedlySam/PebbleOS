@@ -12,6 +12,14 @@
 #include <string.h>
 #include <math.h>
 
+/* AOT: the .aot target string the loader validates against (check_machine_info,
+   prefix-matched). wamrc emits arch "thumbv8m.main" (--target=thumbv8m.main
+   --cpu=cortex-m33); "thumbv8m" is a matching prefix. aot_reloc_thumb.c reads
+   BUILD_TARGET; WAMR's cmake normally sets it but our waf build does not. */
+#ifndef BUILD_TARGET
+#define BUILD_TARGET "thumbv8m"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,7 +50,15 @@ float rintf(float x);
 double sqrt(double x);
 float sqrtf(float x);
 double ceil(double x);
+float ceilf(float x);
 double floor(double x);
+float floorf(float x);
+/* Registered in the AOT reloc symbol table (aot_reloc.h REG_COMMON_SYMBOLS) so
+   AOT-compiled code can call them; newlib's freestanding math.h omits these. */
+double fmin(double x, double y);
+float fminf(float x, float y);
+double fmax(double x, double y);
+float fmaxf(float x, float y);
 
 #ifdef __cplusplus
 }
