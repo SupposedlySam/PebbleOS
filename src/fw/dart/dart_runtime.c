@@ -654,61 +654,101 @@ void command_dart_test(void) {
 #define DART_PFS_MODULE "flutter_app.wasm"
 
 //! Load a pushed module from PFS into a pool buffer, or NULL if none exists.
+//!
+//! Compressed-module container so a large .aot can be delivered over BLE without
+//! hitting the ~5MB PutBytes/PPoG transfer wedge: "DFL0" + uncompressed_size
+//! (u32 LE) + a raw DEFLATE stream. A native-ARM .aot is ~6.4MB but deflates ~3x
+//! (~2.3MB). We peek the 8-byte header first, then -- for the compressed case --
+//! allocate the DECOMPRESSED (6.4MB) buffer BEFORE the transient compressed one,
+//! so the compressed buffer sits ABOVE it in the pool and frees to a contiguous
+//! hole. (Allocating compressed-first left a hole below the .aot that fragmented
+//! the pool and OOM'd the AOT loader's metadata allocations.) A module without
+//! the header is read through as a raw .aot/.wasm.
 static uint8_t *prv_load_pfs_module(uint32_t *size_out) {
   int fd = pfs_open(DART_PFS_MODULE, OP_FLAG_READ, 0, 0);
   if (fd < 0) {
     return NULL; /* no pushed module -- normal case */
   }
   size_t sz = pfs_get_file_size(fd);
-  uint8_t *buf = sz ? (uint8_t *)wasm_runtime_malloc(sz) : NULL;
+  if (sz == 0) {
+    pfs_close(fd);
+    return NULL;
+  }
+
+  /* Peek the container header (leaves the read position at byte 8). */
+  uint8_t hdr[8] = {0};
+  uint32_t peeked = 0;
+  if (sz >= sizeof(hdr)) {
+    if (pfs_read(fd, hdr, sizeof(hdr)) != (int)sizeof(hdr)) {
+      pfs_close(fd);
+      strncpy(s_module_fail, "PFS header read", sizeof(s_module_fail) - 1);
+      return NULL;
+    }
+    peeked = sizeof(hdr);
+  }
+
+  if (peeked == sizeof(hdr) && hdr[0] == 'D' && hdr[1] == 'F' && hdr[2] == 'L'
+      && hdr[3] == '0') {
+    uint32_t ulen;
+    memcpy(&ulen, hdr + 4, sizeof(ulen)); /* little-endian uncompressed size */
+    uint32_t clen = (uint32_t)(sz - sizeof(hdr));
+    /* out FIRST (low in the pool), comp AFTER (high) -> comp frees contiguous. */
+    uint8_t *out = ulen ? (uint8_t *)wasm_runtime_malloc(ulen) : NULL;
+    uint8_t *comp = out ? (uint8_t *)wasm_runtime_malloc(clen) : NULL;
+    if (!out || !comp) {
+      if (comp)
+        wasm_runtime_free(comp);
+      if (out)
+        wasm_runtime_free(out);
+      pfs_close(fd);
+      snprintf(s_module_fail, sizeof(s_module_fail),
+               "no RAM for %u-byte module (+%u tmp)", (unsigned)ulen,
+               (unsigned)clen);
+      return NULL;
+    }
+    int rd = pfs_read(fd, comp, clen);
+    pfs_close(fd);
+    if (rd != (int)clen) {
+      wasm_runtime_free(comp);
+      wasm_runtime_free(out);
+      snprintf(s_module_fail, sizeof(s_module_fail), "PFS short read %d/%u", rd,
+               (unsigned)clen);
+      return NULL;
+    }
+    unsigned int outlen = ulen;
+    int rc = tinflate_uncompress(out, &outlen, comp, clen);
+    wasm_runtime_free(comp); /* frees the high end -> contiguous free tail */
+    if (rc != TINF_OK || outlen != ulen) {
+      wasm_runtime_free(out);
+      snprintf(s_module_fail, sizeof(s_module_fail), "inflate failed rc=%d %u/%u",
+               rc, outlen, (unsigned)ulen);
+      return NULL;
+    }
+    PBL_LOG_ALWAYS("dart: inflated pushed module %u -> %u bytes (defrag load)",
+                   (unsigned)sz, (unsigned)ulen);
+    *size_out = ulen;
+    return out;
+  }
+
+  /* Uncompressed module: read the whole file (the peeked header goes first). */
+  uint8_t *buf = (uint8_t *)wasm_runtime_malloc(sz);
   if (!buf) {
     pfs_close(fd);
     snprintf(s_module_fail, sizeof(s_module_fail),
              "no RAM for %u-byte PFS module", (unsigned)sz);
     return NULL;
   }
-  int rd = pfs_read(fd, buf, sz);
+  if (peeked)
+    memcpy(buf, hdr, peeked);
+  int rd = (sz > peeked) ? pfs_read(fd, buf + peeked, sz - peeked) : 0;
   pfs_close(fd);
-  if (rd != (int)sz) {
+  if ((uint32_t)rd != sz - peeked) {
     wasm_runtime_free(buf);
-    snprintf(s_module_fail, sizeof(s_module_fail), "PFS short read %d/%u",
-             rd, (unsigned)sz);
+    snprintf(s_module_fail, sizeof(s_module_fail), "PFS short read %d/%u", rd,
+             (unsigned)(sz - peeked));
     return NULL;
   }
   PBL_LOG_ALWAYS("dart: loading PUSHED module from PFS (%u bytes)", (unsigned)sz);
-
-  /* Compressed-module container so a large .aot can be delivered over BLE
-     without hitting the ~5MB PutBytes/PPoG wedge: "DFL0" + uncompressed_size
-     (u32 LE) + a raw DEFLATE stream. A native-ARM .aot is ~6.4MB but deflates
-     ~3x (~2.3MB). Inflate here into a fresh pool buffer (PSRAM) before the
-     loader sees it; the loader's own magic ("\0aot"/"\0asm") is unchanged. A
-     module without this header is passed through as-is. */
-  if (sz >= 8 && buf[0] == 'D' && buf[1] == 'F' && buf[2] == 'L'
-      && buf[3] == '0') {
-    uint32_t ulen;
-    memcpy(&ulen, buf + 4, sizeof(ulen)); /* little-endian */
-    uint8_t *out = ulen ? (uint8_t *)wasm_runtime_malloc(ulen) : NULL;
-    if (!out) {
-      wasm_runtime_free(buf);
-      snprintf(s_module_fail, sizeof(s_module_fail),
-               "no RAM for %u-byte inflated module", (unsigned)ulen);
-      return NULL;
-    }
-    unsigned int outlen = ulen;
-    int rc = tinflate_uncompress(out, &outlen, buf + 8, (unsigned int)(sz - 8));
-    wasm_runtime_free(buf); /* done with the compressed copy */
-    if (rc != TINF_OK || outlen != ulen) {
-      wasm_runtime_free(out);
-      snprintf(s_module_fail, sizeof(s_module_fail),
-               "inflate failed rc=%d %u/%u", rc, outlen, (unsigned)ulen);
-      return NULL;
-    }
-    PBL_LOG_ALWAYS("dart: inflated pushed module %u -> %u bytes", (unsigned)sz,
-                   (unsigned)ulen);
-    *size_out = ulen;
-    return out;
-  }
-
   *size_out = (uint32_t)sz;
   return buf;
 }
