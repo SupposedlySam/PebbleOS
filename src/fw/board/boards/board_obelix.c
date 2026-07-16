@@ -201,7 +201,11 @@ static QSPIPortState s_qspi_port_state = {
       .Instance = FLASH2,
       .line = HAL_FLASH_QMODE,
       .base = FLASH2_BASE_ADDR,
-      .msize = 16,
+      /* The part is a 32MB GD25Q256E. RDID auto-detect (bf0_hal_mpi_ex.c) normally
+         overrides this, but if the JEDEC match ever fails, a 16 here caps
+         hflash->size at 16MB and qspi.c's bounds check silently REJECTS every
+         erase/write above 0x13000000 -- i.e. all of DART_MODULE. Declare the truth. */
+      .msize = 32,
       .SpiMode = SPI_MODE_NOR,
     },
     .dma = {

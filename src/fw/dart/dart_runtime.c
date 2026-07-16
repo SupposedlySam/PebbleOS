@@ -10,6 +10,8 @@
 #include "applib/vendor/tinflate/tinflate.h"
 #include "drivers/flash.h"
 #include "flash_region/flash_region.h"
+#include "bluetooth/responsiveness.h"
+#include "pbl/services/comm_session/session.h"
 /* The ~1.18MB stripped Flutter counter is too big for the 3MB firmware FLASH
    partition (fw is ~2.07MB), so it is NOT embedded in .text -- it ships in the
    resource pack (resources/normal/obelix/resource_map.json FLUTTER_COUNTER_WASM,
@@ -1284,6 +1286,29 @@ void command_dart_aotflash(void) {
                            ok ? "OK (native run()=42 from flash)" : "FAILED");
 }
 
+//! Guard a long, blocking flash erase/write issued from the console (KernelBG).
+//! During a multi-second flash stall the BLE stack keeps handling incoming mbufs
+//! on a separate task; those deep call stacks overflow the NimbleHost task stack
+//! and reboot the watch (observed on the first flashchunk). Reduce BLE event
+//! frequency for the duration and mask the KernelBG watchdog -- the exact pattern
+//! put_bytes_storage_raw uses for its raw-region flash writes (put_bytes_storage_raw.c).
+static bool prv_flash_op_begin(void) {
+  comm_session_set_responsiveness(comm_session_get_system_session(),
+                                  BtConsumerPpPutBytes, ResponseTimeMiddle, 0);
+  bool prev = task_watchdog_mask_get(PebbleTask_KernelBackground);
+  if (prev) {
+    task_watchdog_mask_clear(PebbleTask_KernelBackground);
+  }
+  return prev;
+}
+static void prv_flash_op_end(bool prev_watchdog) {
+  if (prev_watchdog) {
+    task_watchdog_mask_set(PebbleTask_KernelBackground);
+  }
+  comm_session_set_responsiveness(comm_session_get_system_session(),
+                                  BtConsumerPpPutBytes, ResponseTimeMin, 0);
+}
+
 //! Console command: `dart flashchunk <hex-offset>` -- materialize one slice of a
 //! large XIP .aot into the DART_MODULE flash region. A 13MB+ .aot can't sit in the
 //! PSRAM pool and a single 13MB BLE PutBytes wedges PPoG, so the host streams it
@@ -1326,8 +1351,22 @@ void command_dart_flashchunk(const char *offset_str) {
   PBL_LOG_ALWAYS("dart: flashchunk off %u len %u erase[0x%08lx-0x%08lx) w@0x%08lx",
                  (unsigned)offset, (unsigned)len, (unsigned long)estart,
                  (unsigned long)eend, (unsigned long)dst);
+  bool wd = prv_flash_op_begin();
   flash_region_erase_optimal_range_no_watchdog(estart, estart, eend, eend);
-  flash_write_bytes(data, dst, len);
+  /* Write in subsector pieces. flash_write_bytes() hands the WHOLE length to the
+     SiFli HAL (flash_api.c -> qspi.c prv_write_nor), which bounce-buffers via
+     kernel_malloc_check() whenever the source spans a 1MB DMA boundary --
+     unconditionally true for any size >= 1MB (IS_DMA_ACCROSS_1M_BOUNDARY). A 2MB
+     call therefore asks the small SRAM kernel heap for 2MB and PBL_CROAK_OOMs
+     *while holding the flash lock*, hanging the watch. Every proven writer on this
+     chip stays small: PFS writes <=4KB pages, PutBytes writes ~KB chunks. Cap each
+     call at a subsector so the worst-case bounce allocation is 4KB. */
+  for (uint32_t off = 0; off < len; off += SUBSECTOR_SIZE_BYTES) {
+    uint32_t n = (len - off) < (uint32_t)SUBSECTOR_SIZE_BYTES ? (len - off)
+                                                              : (uint32_t)SUBSECTOR_SIZE_BYTES;
+    flash_write_bytes(data + off, dst + off, n);
+  }
+  prv_flash_op_end(wd);
   wasm_runtime_free(data);
   pfs_remove(DART_PFS_MODULE); /* consume so the PFS small-module path stays clean */
   prompt_send_response_fmt(buf, sizeof(buf),
@@ -1350,11 +1389,13 @@ void command_dart_flashfin(const char *len_str) {
   }
   uint8_t footer[8] = {'D', 'A', 'O', 'T', 0, 0, 0, 0};
   memcpy(footer + 4, &len, sizeof(len));
+  bool wd = prv_flash_op_begin();
   flash_region_erase_optimal_range_no_watchdog(
       DART_FLASH_META_ADDR, DART_FLASH_META_ADDR,
       DART_FLASH_META_ADDR + SUBSECTOR_SIZE_BYTES,
       DART_FLASH_META_ADDR + SUBSECTOR_SIZE_BYTES);
   flash_write_bytes(footer, DART_FLASH_META_ADDR, sizeof(footer));
+  prv_flash_op_end(wd);
   PBL_LOG_ALWAYS("dart: flashfin footer len=%u @0x%08lx", (unsigned)len,
                  (unsigned long)DART_FLASH_META_ADDR);
   prompt_send_response_fmt(buf, sizeof(buf), "dart: flashfin OK (len %u)",

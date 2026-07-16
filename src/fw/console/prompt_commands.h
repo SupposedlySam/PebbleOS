@@ -328,7 +328,7 @@ static const Command s_prompt_commands[] = {
   { "dart test", command_dart_test, 0 },
   { "dart wasm", command_dart_wasm, 0 },
   { "dart aot", command_dart_aot, 0 },
-  { "dart aotflash", command_dart_aotflash, 0 },
+  { "dart xipflash", command_dart_aotflash, 0 },
   { "dart flashchunk", command_dart_flashchunk, 1 },
   { "dart flashfin", command_dart_flashfin, 1 },
   { "dart flutter", command_dart_flutter, 0 },
