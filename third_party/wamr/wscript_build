@@ -84,6 +84,15 @@ if bld.env.CONFIG_DART_RUNTIME:
         # the root scanner (aot_frame_traverse_gc_rootset) walks these frames' frame_ref
         # maps to find live roots; no frames => roots missed => heap corruption.
         'WASM_ENABLE_AOT_STACK_FRAME=1',
+        # Make a trap NAME ITS SITE. WAMR reuses one string for many opcodes: FIVE
+        # sites raise "out of bounds array access" (aot_emit_gc.c array.new_data /
+        # get / set / fill / copy) and wasm_set_exception overwrites unconditionally,
+        # so the message provably cannot say which one trapped. Reading the site off
+        # that string sent a whole investigation into data segments for hours when
+        # the real opcode was array.get. This walks the frames AOT_STACK_FRAME above
+        # already allocates, so it costs us function indices in existing frames --
+        # cheap next to another blind flash cycle.
+        'WASM_ENABLE_DUMP_CALL_STACK=1',
         'WASM_ENABLE_JIT=0',
         'WASM_ENABLE_LIBC_BUILTIN=0',
         'WASM_ENABLE_LIBC_WASI=0',
