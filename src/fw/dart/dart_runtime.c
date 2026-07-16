@@ -258,10 +258,16 @@ bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
     return false;
   }
 
-  /* WAMR's loader writes the input buffer in place, so a flash-resident
-     (const) module must be copied to RAM; the copy stays valid until unload.
-     On SRAM-only boards this competes with the GC heap; a PSRAM pool removes
-     the constraint. */
+  /* Copy the module to RAM, because the loader may write into the input buffer
+     and because it keeps pointers INTO it (mem_init_data_list[i]->bytes and the
+     native-symbol strings are referenced in place), so the buffer must outlive
+     the load either way. The copy stays valid until unload. On SRAM-only boards
+     it competes with the GC heap; a PSRAM pool removes the constraint.
+
+     NOT true of an --xip/indirect-mode module: its in-buffer writes are all
+     guarded by !is_indirect_mode, which is exactly what lets the flash-XIP path
+     (below) hand wasm_runtime_load a pointer into read-only flash and skip this
+     copy entirely -- the win that makes a 13MB Material .aot fit at all. */
   // Step markers (shipped over the console) to pin where a big module stalls on-device.
   prompt_send_response("dart: [1] rt init OK; copying module");
   module_buf = (uint8_t *)wasm_runtime_malloc(wasm_size);
@@ -461,8 +467,9 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
     }
   } else {
     prv_app_unload_module_locked(); /* replace any cached module */
-    /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
-       rewrites the load buffer in place; kept until the module is unloaded. */
+    /* Take ownership of the caller's RAM buffer (loaded from storage). The
+       loader may write into it AND keeps pointers into it (data-segment bytes,
+       native-symbol strings), so it must live until the module is unloaded. */
     s_app_buf = wasm_buf;
     s_app_module = wasm_runtime_load(s_app_buf, wasm_size, error_buf, sizeof(error_buf));
     if (!s_app_module) {
