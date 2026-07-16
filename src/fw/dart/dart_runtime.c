@@ -233,6 +233,17 @@ static bool prv_call_invoke_main(wasm_module_t module, wasm_module_inst_t inst,
 //! Human-readable reason the last dart_run_module() failed (for the console).
 static char s_module_fail[224];
 
+//! Provenance of the module the resident app is actually running: which source it came from
+//! ("flash-xip" / "pfs" / "resource" / "cached") and its byte size. Reported by `dart status`.
+//!
+//! This exists because guessing it burned real time and nearly produced a FALSE result: a stale
+//! precached module was served via the "load SKIPPED (cached module)" path and looked like a
+//! freshly-delivered one, and the only clue was that its timings resembled a different app. Which
+//! module is running is a FACT the runtime knows -- so it reports it rather than leaving it to be
+//! inferred from init_ms and a screenshot.
+static char s_module_src[24] = "none";
+static uint32_t s_module_bytes;
+
 bool dart_run_module(const uint8_t *wasm_buf, uint32_t wasm_size) {
   char error_buf[128];
   uint8_t *module_buf = NULL;
@@ -441,7 +452,13 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   }
   if (s_app_module && wasm_buf == NULL) {
     /* Warm cache: the module survived the previous stop; skip load+validate. */
+    /* Mark the provenance as cached: this path silently reuses whatever a previous load (often
+       the boot precache) parsed, so `dart status` must SAY so -- a stale cached module reading as
+       a freshly-delivered one is exactly how a false "it works" gets reported. */
     PBL_LOG_ALWAYS("dart phase: load SKIPPED (cached module)");
+    if (!strstr(s_module_src, "+cached")) {
+      strncat(s_module_src, "+cached", sizeof(s_module_src) - strlen(s_module_src) - 1);
+    }
   } else {
     prv_app_unload_module_locked(); /* replace any cached module */
     /* Take ownership of the caller's RAM buffer (loaded from storage). WAMR
@@ -787,6 +804,8 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
   }
   uint8_t *pushed = prv_load_pfs_module(size_out);
   if (pushed) {
+    strncpy(s_module_src, "pfs", sizeof(s_module_src) - 1);
+    s_module_bytes = *size_out;
     return pushed;
   }
   /* XIP-from-flash: a large .aot materialized into the DART_MODULE flash region
@@ -813,6 +832,8 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
       PBL_LOG_ALWAYS("dart: loading XIP module IN-PLACE from FLASH @0x%08lx (%u B)",
                      (unsigned long)FLASH_REGION_DART_MODULE_BEGIN, (unsigned)len);
       *size_out = len;
+      strncpy(s_module_src, "flash-xip", sizeof(s_module_src) - 1);
+      s_module_bytes = len;
       return (uint8_t *)flashmod;
     }
   }
@@ -839,6 +860,8 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
     return NULL;
   }
   *size_out = (uint32_t)sz;
+  strncpy(s_module_src, "resource", sizeof(s_module_src) - 1);
+  s_module_bytes = (uint32_t)sz;
   return buf;
 }
 
@@ -1009,8 +1032,9 @@ void command_dart_gc(void) {
 void command_dart_status(void) {
   char buf[256];
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
+      "dart: running=%s src=%s/%uB frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
       dart_app_is_running() ? "yes" : "no",
+      s_module_src, (unsigned)s_module_bytes,
       dart_embedder_frame_count(),
       (unsigned)s_diag_dispatch_ok, (unsigned)s_diag_dispatch_calls,
       (unsigned)(s_diag_pump_calls - s_diag_pump_noenv), (unsigned)s_diag_pump_calls,

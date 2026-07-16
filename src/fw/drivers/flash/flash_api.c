@@ -128,6 +128,18 @@ void flash_expect_program_failure(bool expect_failure) {
 }
 #endif
 
+//! Cap on how much we hand the impl per call. The SiFli impl (qspi.c prv_write_nor) bounce-buffers
+//! the source through kernel_malloc_check() whenever it spans a 1MB DMA boundary -- which
+//! IS_DMA_ACCROSS_1M_BOUNDARY makes unconditionally true for ANY size >= 1MB. That asks the small
+//! SRAM kernel heap for the whole length and PBL_CROAK_OOMs *while this function holds
+//! s_flash_lock*: the watch hangs with no console, no advertising, and no clean reboot.
+//! Callers must not have to know that. Every writer that has ever worked on this chip already stays
+//! small by accident of its own design (PFS writes <=4KB pages; PutBytes writes ~KB chunks) -- the
+//! one caller that passed megabytes hung the device repeatedly. So cap it HERE and the rule stops
+//! existing. Behaviour is unchanged: the loop below already advances by the impl's return value, so
+//! this only makes it iterate more.
+#define FLASH_WRITE_IMPL_CHUNK_MAX (4096)
+
 void flash_write_bytes(const uint8_t *buffer, uint32_t start_addr,
                        uint32_t buffer_size) {
   mutex_lock(s_flash_lock);
@@ -140,7 +152,10 @@ void flash_write_bytes(const uint8_t *buffer, uint32_t start_addr,
   PBL_ANALYTICS_ADD(flash_spi_write_bytes, buffer_size);
 
   while (buffer_size) {
-    int written = flash_impl_write_page_begin(buffer, start_addr, buffer_size);
+    const uint32_t chunk = (buffer_size > FLASH_WRITE_IMPL_CHUNK_MAX)
+                               ? FLASH_WRITE_IMPL_CHUNK_MAX
+                               : buffer_size;
+    int written = flash_impl_write_page_begin(buffer, start_addr, chunk);
     PBL_ASSERT(
 #ifdef TEST_FLASH_LOCK_PROTECTION
         s_assert_write_error ||
