@@ -359,10 +359,20 @@ static void prv_app_lock(void) {
 }
 static void prv_app_unlock(void) { mutex_unlock(s_app_mutex); }
 
-//! Tear down the resident app INSTANCE. The parsed module + its buffer are
-//! deliberately kept (a warm cache in PSRAM): load+validate of the 1.18MB
-//! module is a large share of launch time, and reusing the parsed module lets
-//! every launch after the first skip it. Caller must hold s_app_mutex.
+static bool prv_app_buf_is_flash(const uint8_t *p);
+static void prv_app_unload_module_locked(void);
+
+//! Tear down the resident app INSTANCE. For a NON-XIP module (PFS/resource,
+//! loaded into a RAM buffer) the parsed module is deliberately KEPT as a warm
+//! cache in PSRAM: its multi-second load+validate is a large share of launch
+//! time, so reusing the parsed module lets later launches skip it. A flash-XIP
+//! module is the opposite -- it reloads in ~1ms, so a warm cache buys nothing
+//! and is pure liability: a parsed AOTModule kept across an app exit is the
+//! cross-exit corruption surface. Its pool block gets freed+reused while we
+//! still hold s_app_module, the EMS allocator writes tree-node pointers over
+//! the struct's module_type (offset 0), and the next instantiate fails
+//! "invalid module type" (the red error screen). So DROP the XIP cache here;
+//! the next open reloads fresh from flash. Caller must hold s_app_mutex.
 static void prv_app_stop_locked(void) {
   // Drop the frame-presented flag so the next app launch shows its loading screen until
   // Flutter paints again. (present-frame renders through the normal app-framebuffer
@@ -375,6 +385,9 @@ static void prv_app_stop_locked(void) {
   }
   if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
   s_app_inject_tap = NULL;
+  if (s_app_module && s_app_buf && prv_app_buf_is_flash(s_app_buf)) {
+    prv_app_unload_module_locked(); /* XIP: no warm cache -- reload (~1ms) next open */
+  }
 }
 
 //! True when a parsed module survives from a previous run (warm cache).
@@ -383,6 +396,18 @@ static bool prv_app_has_cached_module(void) {
   bool cached = s_app_module != NULL;
   prv_app_unlock();
   return cached;
+}
+
+//! True only when a cached module is worth REUSING: it exists AND is non-XIP.
+//! A flash-XIP module is never reused across a launch (prv_app_stop_locked drops
+//! it) -- reloading it costs ~1ms and avoids the cross-exit corruption surface --
+//! so callers must load it fresh instead of passing NULL to dart_app_start.
+static bool prv_app_has_reusable_cache(void) {
+  prv_app_lock();
+  bool reusable = s_app_module != NULL && s_app_buf != NULL
+                  && !prv_app_buf_is_flash(s_app_buf);
+  prv_app_unlock();
+  return reusable;
 }
 
 //! True if `p` points into the DART_MODULE flash region. An XIP module executes
@@ -407,14 +432,22 @@ static void prv_app_unload_module_locked(void) {
 //! runtime, GC heap, module cache, and allocator all live in the PSRAM pool,
 //! and any of them surviving a rail cut is a dangling pointer. After this,
 //! the next dart command re-inits from scratch (requires PSRAM back up).
-void dart_runtime_teardown(void) {
-  prv_app_lock();
+//! Return the runtime to a known-clean, UNINITIALIZED state (next dart_app_start
+//! re-inits a fresh pool). Used both by the full teardown and by dart_app_start's
+//! failure path: a failed load/instantiate leaves the EMS pool indeterminate, so
+//! self-healing back to a clean pool beats leaving it wedged. Caller holds s_app_mutex.
+static void prv_runtime_destroy_locked(void) {
   prv_app_stop_locked();
   prv_app_unload_module_locked();
   if (s_initialized) {
     wasm_runtime_destroy();
     s_initialized = false;
   }
+}
+
+void dart_runtime_teardown(void) {
+  prv_app_lock();
+  prv_runtime_destroy_locked();
   prv_app_unlock();
   PBL_LOG_DBG("dart: runtime torn down (PSRAM can power off)");
 }
@@ -535,8 +568,11 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   return true;
 fail:
   task_watchdog_resume(); /* re-arm before bailing (pause was active past the load) */
-  prv_app_stop_locked();
-  prv_app_unload_module_locked(); /* a half-initialized module is not a valid cache */
+  /* A failed load/instantiate can leave the EMS pool in an indeterminate state
+     (observed: a later fresh load then fails "allocate memory failed", wedged
+     until a manual psram-off). Fully tear the runtime down so the NEXT launch
+     re-inits a clean pool -- self-heal instead of a stuck red error screen. */
+  prv_runtime_destroy_locked();
   prv_app_unlock();
   return false;
 }
@@ -888,11 +924,13 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
 //! dart_runtime_init takes the PSRAM pool. Shared by the console command and the
 //! Counter system app. @return true if it started + pumped the first frame.
 bool dart_app_start_flutter_counter(void) {
-  if (prv_app_has_cached_module()) {
-    /* Warm cache: reuse the parsed module; skips the resource read AND WAMR
-       load/validate. Benign check-then-act gap: if a concurrent failure
-       unloads the cache before dart_app_start re-locks, it fails cleanly
-       with "no cached module" (guarded inside the lock). */
+  if (prv_app_has_reusable_cache()) {
+    /* Warm cache (non-XIP only): reuse the parsed module; skips the resource
+       read AND WAMR load/validate. Benign check-then-act gap: if a concurrent
+       failure unloads the cache before dart_app_start re-locks, it fails
+       cleanly with "no cached module" (guarded inside the lock). A flash-XIP
+       module is deliberately NOT reused (it reloads in ~1ms and a kept AOTModule
+       is the cross-exit corruption surface) -- fall through to a fresh load. */
     return dart_app_start(NULL, 0);
   }
   uint32_t size = 0;
