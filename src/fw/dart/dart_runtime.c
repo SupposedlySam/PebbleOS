@@ -1380,6 +1380,16 @@ void command_dart_flashchunk(const char *offset_str) {
     prompt_send_response("dart: flashchunk runtime init failed");
     return;
   }
+  /* A delivery cannot coexist with a RESIDENT app: a running Flutter app holds
+     ~10MB of the 15MB PSRAM pool (module + GC heap + operand stack), leaving no
+     room for this chunk's decompress buffer -> prv_load_pfs_module fails "no RAM".
+     Free the app + cached module first so that can't happen (was previously worked
+     around by requiring a manual `reset` before delivery). Idempotent: after the
+     first chunk there is nothing to stop. */
+  prv_app_lock();
+  prv_app_stop_locked();
+  prv_app_unload_module_locked();
+  prv_app_unlock();
   uint32_t offset = offset_str ? (uint32_t)strtoul(offset_str, NULL, 0) : 0;
   /* Offsets MUST be subsector-aligned: flashchunk erases the subsectors it covers,
      so a misaligned offset would let chunk i+1's erase wipe chunk i's tail. */
