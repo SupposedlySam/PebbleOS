@@ -906,7 +906,7 @@ static void prv_launch_counter_cb(void *unused); /* defined below; used by dart 
 //! itself, so KernelBG must not block waiting. Poll `dart status` for running=yes.
 void command_dart_flutter(void) {
   launcher_task_add_callback(prv_launch_counter_cb, NULL);
-  prompt_send_response("dart: launching Counter app (Flutter, on the 32KB app task)");
+  prompt_send_response("dart: launching Counter app (Flutter, on the large app task)");
 }
 
 //! `dart tap`: inject a tap at the screen center into the resident app -> the
@@ -972,8 +972,6 @@ void command_dart_tap(void) {
                                                  (void *)(uintptr_t)packed);
   prompt_send_response("dart: tap (100,114) posted to app task");
 }
-
-static void prv_launch_counter_cb(void *unused);
 
 //! `dart reload`: drop the cached module and relaunch the Counter app so a
 //! freshly pushed PFS module (daemon dartpush) takes effect -- the app
