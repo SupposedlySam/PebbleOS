@@ -223,6 +223,16 @@ static size_t prv_get_app_segment_size(const PebbleProcessMd *app_md) {
   }
 }
 
+// Native AOT (wamrc) makes every wasm call a REAL ARM call, so the Flutter app's
+// deep call chain (runApp is 50+ frames) becomes native C-stack depth -- unlike
+// the interpreter, which loops via its own frame stack and needs almost no C
+// stack. 32KB runs the PARED counter on-device (verified: running=yes, trap=0).
+// The FULL Material app is deeper (measured from its .aot .aot_stack_sizes: 14979
+// funcs, p99 588B/frame) and will likely need more -- but SIZE THAT FROM A REAL
+// uxTaskGetStackHighWaterMark READING (dart status reports it), not a guess. Head-
+// room exists: the stack is carved from the ~135KB app data segment below, and
+// this app's SRAM heap is barely used (its wasm module + GC heap live in PSRAM),
+// so this can grow well past 64KB when a measured Material run justifies it.
 #define APP_STACK_FLUTTER_SIZE (32 * 1024)
 
 static size_t prv_get_app_stack_size(const PebbleProcessMd *app_md) {
@@ -231,10 +241,10 @@ static size_t prv_get_app_stack_size(const PebbleProcessMd *app_md) {
     return APP_STACK_JS_SIZE;
   }
 #endif
-  // The Flutter "Counter" app loads a 1.18MB dart2wasm module on the WAMR interpreter;
-  // its deep C call chain overflows the 4K default app stack on the app task (the same
-  // load completes fine from the deeper-headroom KernelBG task). Give that one app a
-  // generous stack. UUID da770002-0000-4000-8000-000000000002 (flutter_counter_get_app_info).
+  // The Flutter "Counter" app runs a dart2wasm module compiled to native ARM AOT;
+  // its deep native call chain overflows the 4K default app stack. Give that one
+  // app a large stack (see APP_STACK_FLUTTER_SIZE above).
+  // UUID da770002-0000-4000-8000-000000000002 (flutter_counter_get_app_info).
   static const Uuid s_flutter_counter_uuid = {
     0xda, 0x77, 0x00, 0x02, 0x00, 0x00, 0x40, 0x00,
     0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };

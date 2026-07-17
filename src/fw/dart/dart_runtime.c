@@ -892,14 +892,20 @@ bool dart_app_start_flutter_counter(void) {
   return dart_app_start(mod, size); /* takes ownership of mod */
 }
 
-//! `dart flutter`: console entry to start the Flutter counter (renders frame 0).
-//! The instance stays resident so `dart tap` (or the Counter app's buttons) drive it.
+static void prv_launch_counter_cb(void *unused); /* defined below; used by dart flutter */
+
+//! `dart flutter`: console entry to start the Flutter counter. LAUNCHES the Counter
+//! APP through the app manager (identical to `dart counter`) rather than running
+//! dart_app_start inline -- because a console command runs on KernelBG, whose stack
+//! is 4KB (fw_common.ld), and native-AOT wasm executes on the CALLING task's C
+//! stack (every wasm call is a real ARM call). Flutter's 50+-frame runApp overflows
+//! 4KB -> "native stack overflow". The app-manager launch runs it on the Counter's
+//! dedicated 32KB app task WITH the correct app framebuffer (presentFrame targets
+//! the foreground app). Fire-and-forget: dart_app_start pauses the (global) watchdog
+//! itself, so KernelBG must not block waiting. Poll `dart status` for running=yes.
 void command_dart_flutter(void) {
-  char buf[160];
-  bool ok = dart_app_start_flutter_counter();
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: flutter %s%s%s",
-                           ok ? "OK (frame 0)" : "FAILED",
-                           s_module_fail[0] ? " - " : "", s_module_fail);
+  launcher_task_add_callback(prv_launch_counter_cb, NULL);
+  prompt_send_response("dart: launching Counter app (Flutter, on the 32KB app task)");
 }
 
 //! `dart tap`: inject a tap at the screen center into the resident app -> the
@@ -952,11 +958,18 @@ void command_touch_status(void) {
       (int)x, (int)y, (unsigned)subs, (int)enabled);
 }
 
+//! `dart tap`: inject a tap at the screen centre. POSTS to the app task (like
+//! `dart tapat`) instead of calling inject directly: inject dispatches AND pumps a
+//! frame, and the native-AOT render is a deep native call chain that overflows
+//! KernelBG's 4KB console stack -- it must run on the Counter's 32KB app task. The
+//! dispatched frame is drawn by the app's own frame tick. Precondition: launch the
+//! app first (`dart flutter`/`dart counter`, wait for running=yes), same as a
+//! physical button press.
 void command_dart_tap(void) {
-  char buf[160];
-  bool ok = dart_app_inject_tap(100.0, 114.0);
-  prompt_send_response_fmt(buf, sizeof(buf), "dart: tap %s",
-                           ok ? "OK (re-rendered)" : "FAILED (no app running?)");
+  uint32_t packed = ((uint32_t)100 << 16) | (114u & 0xFFFF);
+  process_manager_send_callback_event_to_process(PebbleTask_App, prv_tapat_app_cb,
+                                                 (void *)(uintptr_t)packed);
+  prompt_send_response("dart: tap (100,114) posted to app task");
 }
 
 static void prv_launch_counter_cb(void *unused);
