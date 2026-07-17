@@ -590,11 +590,21 @@ static bool prv_dispatch_tap_locked(double x, double y) {
 //! background work (and its watchdog feed) keeps flowing; the pause(240)
 //! covers OUR task's bit, not theirs.
 static uint32_t s_diag_pump_calls, s_diag_pump_noenv;
+/* Split the early-return reason so `dart status` can say WHICH condition skips the
+   pump: env NULL vs module trapped. Diagnoses the observed contradiction where the
+   frame tick pumps but never renders (pump=0/N) yet dart status shows running=yes +
+   trap=0 -- these pin whether s_app_exec_env went NULL or a per-tick trap is being
+   set-and-cleared between status reads. */
+static uint32_t s_diag_pump_nullenv, s_diag_pump_trapped;
 
 static void prv_pump_locked(void) {
   s_diag_pump_calls++;
-  if (!s_app_exec_env || dart_embedder_module_trapped()) {
+  bool no_env = !s_app_exec_env;
+  bool trapped = dart_embedder_module_trapped();
+  if (no_env || trapped) {
     s_diag_pump_noenv++;
+    if (no_env) s_diag_pump_nullenv++;
+    if (trapped) s_diag_pump_trapped++;
     return;
   }
   task_watchdog_pause(240);
@@ -1061,12 +1071,13 @@ void command_dart_status(void) {
                             * sizeof(StackType_t))
                : 0u;
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s src=%s/%uB frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u appstk_free=%uB fail=%s",
+      "dart: running=%s src=%s/%uB frames=%d disp=%u/%u pump=%u/%u (nullenv=%u trapped=%u) drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u appstk_free=%uB fail=%s",
       dart_app_is_running() ? "yes" : "no",
       s_module_src, (unsigned)s_module_bytes,
       dart_embedder_frame_count(),
       (unsigned)s_diag_dispatch_ok, (unsigned)s_diag_dispatch_calls,
       (unsigned)(s_diag_pump_calls - s_diag_pump_noenv), (unsigned)s_diag_pump_calls,
+      (unsigned)s_diag_pump_nullenv, (unsigned)s_diag_pump_trapped,
       (unsigned)dart_embedder_diag_tasks_drained(),
       (int)dart_embedder_module_trapped(),
       (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,
