@@ -233,7 +233,11 @@ static size_t prv_get_app_segment_size(const PebbleProcessMd *app_md) {
 // room exists: the stack is carved from the ~135KB app data segment below, and
 // this app's SRAM heap is barely used (its wasm module + GC heap live in PSRAM),
 // so this can grow well past 64KB when a measured Material run justifies it.
-#define APP_STACK_FLUTTER_SIZE (32 * 1024)
+// 64KB: generous enough to LET full Material run (measured depth-100 p99 ~= 57KB)
+// so `dart status`'s appstk_free (uxTaskGetStackHighWaterMark) can then report the
+// REAL minimum and we trim to it. The pared counter needs far less (ran in 32KB).
+// Carved from the ~135KB app segment, leaving ~70KB for the app's own load+heap.
+#define APP_STACK_FLUTTER_SIZE (64 * 1024)
 
 static size_t prv_get_app_stack_size(const PebbleProcessMd *app_md) {
 #ifdef CONFIG_MODDABLE_XS

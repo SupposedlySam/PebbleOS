@@ -25,6 +25,7 @@
 #include "console/dbgserial.h"
 #include "console/prompt.h"
 #include "drivers/task_watchdog.h"
+#include "kernel/pebble_tasks.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -1051,8 +1052,18 @@ void command_dart_gc(void) {
 //! Safe to call at any time; reads only global flags (no WAMR calls).
 void command_dart_status(void) {
   char buf[256];
+  /* Minimum free bytes the APP TASK's C stack ever reached (native-AOT executes
+     on it). Lets us SIZE APP_STACK_FLUTTER_SIZE from a real run instead of a
+     guess: appstk_free near 0 means grow it; a big number means we can trim.
+     uxTaskGetStackHighWaterMark returns words; *sizeof(StackType_t) for bytes.
+     Handle is NULL when no app is running -> report 0. */
+  TaskHandle_t app_task = pebble_task_get_handle_for_task(PebbleTask_App);
+  unsigned appstk_free =
+      app_task ? (unsigned)(uxTaskGetStackHighWaterMark(app_task)
+                            * sizeof(StackType_t))
+               : 0u;
   prompt_send_response_fmt(buf, sizeof(buf),
-      "dart: running=%s src=%s/%uB frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u fail=%s",
+      "dart: running=%s src=%s/%uB frames=%d disp=%u/%u pump=%u/%u drained=%u trap=%d init_ms=%u (load=%u inst=%u main=%u frame=%u) tap_ms=%u appstk_free=%uB fail=%s",
       dart_app_is_running() ? "yes" : "no",
       s_module_src, (unsigned)s_module_bytes,
       dart_embedder_frame_count(),
@@ -1062,7 +1073,7 @@ void command_dart_status(void) {
       (int)dart_embedder_module_trapped(),
       (unsigned)s_init_ms, (unsigned)s_load_ms, (unsigned)s_inst_ms,
       (unsigned)s_main_ms, (unsigned)s_frame_ms,
-      (unsigned)s_last_tap_ms,
+      (unsigned)s_last_tap_ms, appstk_free,
       s_module_fail[0] ? s_module_fail : "(none)");
 }
 
