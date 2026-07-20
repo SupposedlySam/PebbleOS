@@ -121,6 +121,10 @@ static void prv_fail(CounterData *data, const char *why) {
 static void prv_start(void *ctx) {
   CounterData *data = app_state_get_user_data();
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  // Supersede any power-down the previous exit queued (atomic vs. the KernelBG
+  // callback), BEFORE trusting is_ready() -- otherwise a fast reopen could skip
+  // bring-up on stale is_ready and then have PSRAM cut out from under it.
+  sf32lb52_psram_cancel_powerdown();
   if (!sf32lb52_psram_is_ready()) {
     if (!system_task_add_callback(prv_psram_bringup_cb, NULL)) {
       prv_fail(data, "could not queue PSRAM bring-up");
@@ -165,13 +169,16 @@ static void prv_init(void) {
 }
 
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-//! Runs on KernelBG after the app exits: with no Dart app resident, the whole
-//! PSRAM stack (die rail + 288MHz PLL + controller) idles at real battery cost
-//! -- it halved multi-day battery life. Power it down; the next launch pays
-//! the full bring-up + module parse again (~8s), which is the right trade on
-//! a wrist.
-__attribute__((unused)) static void prv_psram_powerdown_cb(void *unused) {
-  sf32lb52_psram_powerdown();
+//! Runs on KernelBG (privileged, like bring-up): powers the whole PSRAM stack
+//! down (die DPD + 288MHz PLL + controller + pad park) so an idle watch isn't
+//! paying its always-on cost -- it halved multi-day battery life. Safe ONLY
+//! after the Dart runtime is fully torn down (its pool lives in PSRAM); the
+//! next launch pays the full bring-up + module parse again (~8s), the right
+//! trade on a wrist.
+static void prv_psram_powerdown_cb(void *unused) {
+  // if_armed: a no-op when the next app enter already cancelled it, so PSRAM is
+  // never cut out from under a fast reopen (atomic vs. cancel_powerdown).
+  sf32lb52_psram_powerdown_if_armed();
 }
 #endif
 
@@ -182,13 +189,30 @@ static void prv_deinit(void) {
     app_timer_cancel(s_frame_timer);
     s_frame_timer = NULL;
   }
-  dart_app_stop();
-  // NOTE: auto PSRAM power-down on exit is DISABLED for now: the manual
-  // console round-trip (psram off -> psram 2 -> launch) is verified stable,
-  // but this in-deinit path raced the next launch into a silent hardware
-  // reset (no coredump). Power-down stays a console/session-teardown action
-  // (`psram off`) until that race is root-caused. The teardown+powerdown
-  // helpers stay, and prv_psram_powerdown_cb documents the intended shape.
+  // Fully tear down the Dart runtime -- NOT just the instance (dart_app_stop) --
+  // because we are about to power PSRAM down and the runtime's pool lives there.
+  // Leaving the runtime initialized over dead PSRAM is exactly what raced the
+  // next launch into a silent reset when on-exit power-down was tried before
+  // (that path used dart_app_stop, so s_initialized stayed set and the next
+  // dart_runtime_init reused a stale, powered-down pool). dart_runtime_teardown
+  // clears that state; this is the console `psram off` order (teardown FIRST).
+  dart_runtime_teardown();
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  // Power PSRAM down for battery whenever the app exits (incl. the Back button).
+  // ARM it, then run the actual power-down on KernelBG (privileged, like bring-up).
+  // We deliberately do NOT wait: prv_deinit runs inside the ~3s graceful-close
+  // deadline, and blocking here risks a force-kill/croak. The race a wait would
+  // guard is instead closed by making the power-down cancelable -- the next enter
+  // calls sf32lb52_psram_cancel_powerdown() so a fast reopen supersedes a pending
+  // power-down atomically (see prv_start). Bring-up on the next enter is prv_start's.
+  sf32lb52_psram_arm_powerdown();
+  if (!system_task_add_callback(prv_psram_powerdown_cb, NULL)) {
+    // KernelBG queue full: PSRAM stays up one extra cycle (battery only). It
+    // self-heals -- the next enter cancels the stale arm, or the next exit
+    // re-queues and powers down then. No crash. Log so the leak is visible.
+    APP_LOG(APP_LOG_LEVEL_WARNING, "counter: PSRAM power-down not queued (KernelBG full)");
+  }
+#endif
   window_destroy(data->window);
   task_free(data);
 }

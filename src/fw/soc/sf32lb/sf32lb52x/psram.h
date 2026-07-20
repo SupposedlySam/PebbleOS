@@ -28,6 +28,16 @@ bool sf32lb52_psram_is_ready(void);
 //! consumer first (the Dart runtime pool lives there).
 void sf32lb52_psram_powerdown(void);
 
+//! Deferred, cancelable power-down for the app-exit path. arm_powerdown() marks
+//! intent; the app then queues a KernelBG callback that calls powerdown_if_armed()
+//! (powers down iff still armed, atomically vs. cancel). On the next app ENTER,
+//! call cancel_powerdown() BEFORE trusting is_ready(), so a fast reopen supersedes
+//! a power-down the previous exit queued rather than racing it (which would cut
+//! PSRAM out from under the new launch -> hardware fault).
+void sf32lb52_psram_arm_powerdown(void);
+void sf32lb52_psram_cancel_powerdown(void);
+void sf32lb52_psram_powerdown_if_armed(void);
+
 //! Bytes of PSRAM that passed the bring-up verify (contig+inverse+random over
 //! the span). The WAMR pool must not exceed this.
 uint32_t sf32lb52_psram_verified_bytes(void);

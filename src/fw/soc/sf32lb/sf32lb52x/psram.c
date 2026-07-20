@@ -271,10 +271,13 @@ static HAL_StatusTypeDef prv_psram_init(uint16_t div, PsramEmitFn emit) {
 //! (needs a working controller), then controller off, then the PLL, then park
 //! the pads, then cut the die rail. Resets the init guards so a later
 //! bring-up runs the full sequence from this boot-like state.
-void sf32lb52_psram_powerdown(void) {
-  mutex_lock(prv_state_mutex());
+// Armed on app exit, cleared on the next enter. Guarded by prv_state_mutex().
+static bool s_powerdown_armed;
+
+//! The power-down sequence; CALLER HOLDS prv_state_mutex(). Split out so the
+//! cancelable path can check-and-power-down atomically against a reopen's cancel.
+static void prv_powerdown_locked(void) {
   if (!s_psram_inited) {
-    mutex_unlock(prv_state_mutex());
     return;
   }
   // The PSRAM window (0x60000000) is cacheable write-back: DISCARD any lines
@@ -318,6 +321,40 @@ void sf32lb52_psram_powerdown(void) {
   s_psram_ready = false;
   s_psram_inited = false;
   s_psram_init_res = HAL_ERROR;
+}
+
+void sf32lb52_psram_powerdown(void) {
+  mutex_lock(prv_state_mutex());
+  prv_powerdown_locked();
+  mutex_unlock(prv_state_mutex());
+}
+
+//! Arm a deferred power-down. The caller then queues the KernelBG callback that
+//! runs sf32lb52_psram_powerdown_if_armed(). Cleared by cancel_powerdown().
+void sf32lb52_psram_arm_powerdown(void) {
+  mutex_lock(prv_state_mutex());
+  s_powerdown_armed = true;
+  mutex_unlock(prv_state_mutex());
+}
+
+//! Cancel an armed power-down. Call on app ENTER before trusting is_ready(), so a
+//! reopen supersedes a power-down the previous exit queued instead of racing it.
+void sf32lb52_psram_cancel_powerdown(void) {
+  mutex_lock(prv_state_mutex());
+  s_powerdown_armed = false;
+  mutex_unlock(prv_state_mutex());
+}
+
+//! Power down ONLY if still armed -- atomically vs. cancel_powerdown() (both hold
+//! the state mutex across the whole check). The KernelBG exit callback calls this;
+//! a reopen that cancelled first makes it a no-op, so PSRAM never dies under a
+//! live runtime. No-op (already down / never inited) is handled by the body.
+void sf32lb52_psram_powerdown_if_armed(void) {
+  mutex_lock(prv_state_mutex());
+  if (s_powerdown_armed) {
+    s_powerdown_armed = false;
+    prv_powerdown_locked();
+  }
   mutex_unlock(prv_state_mutex());
 }
 

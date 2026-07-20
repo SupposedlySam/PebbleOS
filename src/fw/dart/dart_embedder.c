@@ -1001,6 +1001,17 @@ void dart_embedder_reset_frame(void) {
   }
 }
 
+//! Called when the WAMR pool that backs s_frame_snap is destroyed
+//! (dart_runtime_teardown), so the snapshot pointer's lifetime matches the pool's.
+//! WITHOUT this, after a teardown + PSRAM power-down the pointer dangles into the
+//! disabled PSRAM window and the next dart_embedder_reset_frame() would memset
+//! into dead memory -> asynchronous bus fault (a silent reset with no coredump).
+void dart_embedder_on_pool_destroyed(void) {
+  s_frame_snap = NULL;
+  s_snap_w = 0;
+  s_snap_h = 0;
+}
+
 /* Blit a GColor8 frame ([pixels], 1 byte/px row-major [w]x[h] -- the dartui
    rasterizer works in the panel format) into the APP framebuffer with straight
    row copies, then request a normal app render. The compositor composites the

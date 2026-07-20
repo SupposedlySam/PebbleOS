@@ -47,6 +47,11 @@ int dart_embedder_frame_count(void);
 //! shows again until its first frame).
 void dart_embedder_reset_frame(void);
 
+//! Drop the last-frame snapshot because the WAMR pool that backed it is being
+//! destroyed. Call from the runtime teardown right after wasm_runtime_destroy so
+//! a later reset_frame() can't memset a pointer into a freed/powered-down pool.
+void dart_embedder_on_pool_destroyed(void);
+
 //! The last frame Flutter presented, as a GColor8 pixel buffer (stride == width), or
 //! NULL before the first present. Persists across compositor repaints: presentFrame
 //! blits into the FOREGROUND app's framebuffer (task-local, app_state_get_framebuffer),

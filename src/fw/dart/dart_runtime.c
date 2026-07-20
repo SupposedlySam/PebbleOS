@@ -444,6 +444,9 @@ static void prv_runtime_destroy_locked(void) {
   if (s_initialized) {
     wasm_runtime_destroy();
     s_initialized = false;
+    /* The pool is gone -- drop the embedder's frame snapshot pointer into it, or a
+       later reset_frame() memsets a dangling pointer (fatal once PSRAM powers down). */
+    dart_embedder_on_pool_destroyed();
   }
 }
 
@@ -649,8 +652,11 @@ static bool prv_inject_key_locked(int64_t physical, int64_t logical) {
     return false;
   }
   s_diag_dispatch_ok++;
-  PBL_LOG_INFO("dart: injectKey(phys=0x%llx log=0x%llx) OK",
-               (unsigned long long)physical, (unsigned long long)logical);
+  /* loghash rejects 64-bit args; physical is a small USB-HID code and the
+     logical key's low word distinguishes the keys we send (Enter 0x..0d, arrows
+     0x..30x), so 32-bit specifiers identify the key without %ll. */
+  PBL_LOG_INFO("dart: injectKey(phys=0x%x log_lo=0x%x) OK",
+               (unsigned)physical, (unsigned)logical);
   return true;
 }
 
