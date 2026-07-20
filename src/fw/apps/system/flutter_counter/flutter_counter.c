@@ -68,8 +68,16 @@ static void prv_frame_tick(void *context) {
   s_frame_timer = app_timer_register(COUNTER_FRAME_MS, prv_frame_tick, NULL);
 }
 
+// USB-HID physical + Flutter logical key ids for Enter, which Flutter's default
+// shortcuts map to ActivateIntent -> the focused widget's onPressed. Delivering
+// this on an Up press activates the focused FAB, using Flutter's own D-pad/remote
+// machinery -- no coordinate, works for any focusable widget.
+#define KEY_ENTER_PHYSICAL 0x00070028LL
+#define KEY_ENTER_LOGICAL  0x0010000000dLL
+
 static void prv_tap(ClickRecognizerRef recognizer, void *context) {
-  dart_app_dispatch_only(100.0, 114.0); /* count++ now; the frame tick renders */
+  /* Up = "activate the focused widget". count++ now; the frame tick renders. */
+  dart_app_inject_key(KEY_ENTER_PHYSICAL, KEY_ENTER_LOGICAL);
 }
 
 //! Real touchscreen input: forward each touchdown to Flutter at the actual
@@ -84,9 +92,9 @@ static void prv_touch(const TouchEvent *event, void *context) {
 }
 
 static void prv_click_config(void *context) {
+  // Only UP increments the counter (taps the FAB); SELECT/DOWN are intentionally
+  // left unbound. BACK stays the app's exit, handled by the window framework.
   window_single_click_subscribe(BUTTON_ID_UP, prv_tap);
-  window_single_click_subscribe(BUTTON_ID_SELECT, prv_tap);
-  window_single_click_subscribe(BUTTON_ID_DOWN, prv_tap);
 }
 
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)

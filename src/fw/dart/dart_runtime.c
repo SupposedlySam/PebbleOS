@@ -349,6 +349,7 @@ static wasm_module_t s_app_module;
 static wasm_module_inst_t s_app_inst;
 static wasm_exec_env_t s_app_exec_env;
 static wasm_function_inst_t s_app_inject_tap;
+static wasm_function_inst_t s_app_inject_key; /* injectKey(i64 physical, i64 logical): a hardware button as a key event */
 static PebbleMutex *s_app_mutex;
 
 static void prv_app_lock(void) {
@@ -385,6 +386,7 @@ static void prv_app_stop_locked(void) {
   }
   if (s_app_inst) { wasm_runtime_deinstantiate(s_app_inst); s_app_inst = NULL; }
   s_app_inject_tap = NULL;
+  s_app_inject_key = NULL;
   if (s_app_module && s_app_buf && prv_app_buf_is_flash(s_app_buf)) {
     prv_app_unload_module_locked(); /* XIP: no warm cache -- reload (~1ms) next open */
   }
@@ -562,6 +564,12 @@ bool dart_app_start(uint8_t *wasm_buf, uint32_t wasm_size) {
   if (!s_app_inject_tap) {
     PBL_LOG_ALWAYS("dart: app has no injectTap export (input disabled)");
   }
+  /* Hardware buttons arrive as key events through this export (the engine always
+     provides it). Absence would mean a stale module without key support. */
+  s_app_inject_key = wasm_runtime_lookup_function(s_app_inst, "injectKey");
+  if (!s_app_inject_key) {
+    PBL_LOG_ALWAYS("dart: app has no injectKey export (buttons inert)");
+  }
   /* Note: s_module_fail can be non-empty here (evloop exception / no frame) while
      we still return true -- "started but degraded"; dart status surfaces it. */
   prv_app_unlock();
@@ -611,6 +619,38 @@ static bool prv_dispatch_tap_locked(double x, double y) {
   }
   s_diag_dispatch_ok++;
   PBL_LOG_INFO("dart: injectTap(%d,%d) OK", (int)x, (int)y);
+  return true;
+}
+
+//! Deliver a hardware button as a KEY event WITHOUT rendering, via the engine's
+//! `injectKey(i64 physical, i64 logical)` export: Flutter's Focus/Shortcuts/
+//! Actions then activate the focused widget (Enter -> its onPressed) or move
+//! focus (arrows) -- no coordinate, works for any focusable widget. Same
+//! task-rebind + trap discipline as prv_dispatch_tap_locked; the frame tick
+//! renders. Caller must hold s_app_mutex.
+static bool prv_inject_key_locked(int64_t physical, int64_t logical) {
+  s_diag_dispatch_calls++;
+  if (dart_embedder_module_trapped()) {
+    PBL_LOG_WRN("dart: injectKey refused -- module trapped (state undefined)");
+    return false;
+  }
+  if (!s_app_exec_env || !s_app_inject_key) {
+    PBL_LOG_WRN("dart: injectKey with no app/export (env=%p fn=%p)",
+                s_app_exec_env, s_app_inject_key);
+    return false;
+  }
+  wamr_pebble_bind_exec_env_to_current_task(s_app_exec_env);
+  /* injectKey(i64 physical, i64 logical): two i64 occupy 4 arg cells. */
+  uint32_t argv[4];
+  memcpy(&argv[0], &physical, sizeof(int64_t));
+  memcpy(&argv[2], &logical, sizeof(int64_t));
+  if (!wasm_runtime_call_wasm(s_app_exec_env, s_app_inject_key, 4, argv)) {
+    PBL_LOG_ERR("dart: injectKey trap: %s", wasm_runtime_get_exception(s_app_inst));
+    return false;
+  }
+  s_diag_dispatch_ok++;
+  PBL_LOG_INFO("dart: injectKey(phys=0x%llx log=0x%llx) OK",
+               (unsigned long long)physical, (unsigned long long)logical);
   return true;
 }
 
@@ -677,6 +717,15 @@ bool dart_app_dispatch_only(double x, double y) {
   prv_app_lock();
   task_watchdog_pause(240);
   bool ok = prv_dispatch_tap_locked(x, y);
+  task_watchdog_resume();
+  prv_app_unlock();
+  return ok;
+}
+
+bool dart_app_inject_key(int64_t physical, int64_t logical) {
+  prv_app_lock();
+  task_watchdog_pause(240);
+  bool ok = prv_inject_key_locked(physical, logical);
   task_watchdog_resume();
   prv_app_unlock();
   return ok;

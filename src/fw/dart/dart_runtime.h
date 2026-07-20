@@ -59,6 +59,15 @@ bool dart_app_dispatch_only(double x, double y);
 //! Render any frame the dispatches scheduled (drains the event loop once).
 void dart_app_pump(void);
 
+//! Deliver a hardware button as a KEY event to the resident app via the engine's
+//! `injectKey(physical, logical)` export (USB-HID physical + Flutter logical key
+//! ids): Flutter's Focus/Shortcuts/Actions activate the focused widget (Enter ->
+//! its onPressed) or move focus (arrows), so no coordinate is needed and any
+//! focusable widget works. WITHOUT rendering (the frame tick renders). No-op if
+//! no app is running or it lacks the export. @return true if it dispatched
+//! without trapping.
+bool dart_app_inject_key(int64_t physical, int64_t logical);
+
 //! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
 void dart_app_stop(void);
 
