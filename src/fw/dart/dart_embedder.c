@@ -1141,7 +1141,9 @@ static inline void prv_fill_span(uint8_t *fb, int w, int y, int xa, int xb, cons
 
 //! Native scanline polygon fill (mirror of engine.dart _fillPath): the
 //! O(rows*edges) crossing+sort loop dominated the interpreter (~74% of a
-//! frame's raster). meta = [w,h,nsub,argb,evenOdd,cx0,cy0,cx1,cy1, len0,...];
+//! frame's raster). meta = [w,h,nsub,argb,evenOdd,cx0,cy0,cx1,cy1,
+//! rflag,rL,rT,rR,rB,rtl,rtr,rbr,rbl, len0,...]; rflag..rbl are an optional
+//! rounded-rect clip narrowed per scanline (rflag=0 => plain rect scissor).
 //! pts = concatenated subpath points in device px (packed to 3 ref args -- the
 //! trampoline drops scalar args past the 8th).
 // Max edge crossings tracked per scanline. Kept small: xs[]+wind[] live on the
@@ -1150,6 +1152,13 @@ static inline void prv_fill_span(uint8_t *fb, int w, int y, int xa, int xb, cons
 // paths cross <=~8 edges/scanline; the `nx < FP_MAX_XS` guard clamps any excess
 // (that one scanline mis-fills, never crashes).
 #define FP_MAX_XS 96
+// fillPath meta index layout -- KEEP IN LOCKSTEP with engine.dart (_fpW.._fpHdr)
+// and route_a/dart_host.c. Inserting a field shifts FPM_HDR (the lens start) and
+// must be mirrored in all three, or every path fill corrupts on device.
+enum { FPM_W=0, FPM_H=1, FPM_NSUB=2, FPM_ARGB=3, FPM_EVENODD=4,
+       FPM_CX0=5, FPM_CY0=6, FPM_CX1=7, FPM_CY1=8,
+       FPM_RFLAG=9, FPM_RL=10, FPM_RT=11, FPM_RR=12, FPM_RB=13,
+       FPM_RTL=14, FPM_RTR=15, FPM_RBR=16, FPM_RBL=17, FPM_HDR=18 };
 static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts_obj,
                           wasm_obj_t meta_obj) {
   (void)env;
@@ -1160,9 +1169,16 @@ static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts
   const double *pts = (const double *)wamr_pebble_array_raw_data(pts_obj);
   const int32_t *meta = (const int32_t *)wamr_pebble_array_raw_data(meta_obj);
   if (!fb || !pts || !meta) return;
-  int w = meta[0], h = meta[1], nsub = meta[2], argb = meta[3], even_odd = meta[4];
-  int cx0 = meta[5], cy0 = meta[6], cx1 = meta[7], cy1 = meta[8];
-  const int32_t *lens = meta + 9;
+  int w = meta[FPM_W], h = meta[FPM_H], nsub = meta[FPM_NSUB], argb = meta[FPM_ARGB], even_odd = meta[FPM_EVENODD];
+  int cx0 = meta[FPM_CX0], cy0 = meta[FPM_CY0], cx1 = meta[FPM_CX1], cy1 = meta[FPM_CY1];
+  // Rounded-clip params: rflag=1 => narrow [cx0,cx1] per scanline to a
+  // rounded-rect [rL,rT,rR,rB] with circular corner radii (rtl,rtr,rbr,rbl), so
+  // a Material clipped fill (a FAB focus highlight, a card body) rounds instead
+  // of squaring to the bounding box.
+  int rflag = meta[FPM_RFLAG];
+  int rL = meta[FPM_RL], rT = meta[FPM_RT], rR = meta[FPM_RR], rB = meta[FPM_RB];
+  int rtl = meta[FPM_RTL], rtr = meta[FPM_RTR], rbr = meta[FPM_RBR], rbl = meta[FPM_RBL];
+  const int32_t *lens = meta + FPM_HDR;
   if (cx0 < 0) { cx0 = 0; }
   if (cy0 < 0) { cy0 = 0; }
   if (cx1 > w) { cx1 = w; }
@@ -1172,6 +1188,31 @@ static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts
   double xs[FP_MAX_XS]; int wind[FP_MAX_XS];
   for (int y = cy0; y < cy1; y++) {
     double yc = y + 0.5;
+    // Per-scanline clip bounds, narrowed by any rounded corners.
+    int lx = cx0, rx = cx1;
+    if (rflag) {
+      if (rtl > 0 && yc < rT + rtl) {
+        double d = (rT + rtl) - yc, q = (double)rtl * rtl - d * d;
+        int nl = (int)ceil(rL + (q > 0 ? rtl - sqrt(q) : rtl));
+        if (nl > lx) { lx = nl; }
+      }
+      if (rtr > 0 && yc < rT + rtr) {
+        double d = (rT + rtr) - yc, q = (double)rtr * rtr - d * d;
+        int nr = (int)floor(rR - (q > 0 ? rtr - sqrt(q) : rtr));
+        if (nr < rx) { rx = nr; }
+      }
+      if (rbl > 0 && yc > rB - rbl) {
+        double d = yc - (rB - rbl), q = (double)rbl * rbl - d * d;
+        int nl = (int)ceil(rL + (q > 0 ? rbl - sqrt(q) : rbl));
+        if (nl > lx) { lx = nl; }
+      }
+      if (rbr > 0 && yc > rB - rbr) {
+        double d = yc - (rB - rbr), q = (double)rbr * rbr - d * d;
+        int nr = (int)floor(rR - (q > 0 ? rbr - sqrt(q) : rbr));
+        if (nr < rx) { rx = nr; }
+      }
+      if (rx <= lx) continue;
+    }
     int nx = 0, base = 0;
     for (int s = 0; s < nsub; s++) {
       int n = lens[s] / 2;
@@ -1198,8 +1239,8 @@ static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts
     if (even_odd) {
       for (int k = 0; k + 1 < nx; k += 2) {
         int xa = (int)ceil(xs[k]), xb = (int)ceil(xs[k + 1]);
-        if (xa < cx0) { xa = cx0; }
-        if (xb > cx1) { xb = cx1; }
+        if (xa < lx) { xa = lx; }
+        if (xb > rx) { xb = rx; }
         prv_fill_span(fb, w, y, xa, xb, &sh);
       }
     } else {
@@ -1208,8 +1249,8 @@ static void prv_fill_path(wasm_exec_env_t env, wasm_obj_t fb_obj, wasm_obj_t pts
         acc += wind[k];
         if (acc != 0) {
           int xa = (int)ceil(xs[k]), xb = (int)ceil(xs[k + 1]);
-          if (xa < cx0) { xa = cx0; }
-          if (xb > cx1) { xb = cx1; }
+          if (xa < lx) { xa = lx; }
+          if (xb > rx) { xb = rx; }
           prv_fill_span(fb, w, y, xa, xb, &sh);
         }
       }
