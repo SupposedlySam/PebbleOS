@@ -6,3 +6,4 @@
 #include "process_management/pebble_process_md.h"
 
 extern const PebbleProcessMd *flutter_counter_get_app_info(void);
+extern const PebbleProcessMd *flutter_watchface_get_app_info(void);

@@ -71,6 +71,19 @@ bool dart_app_inject_key(int64_t physical, int64_t logical);
 //! Tear down the resident app (exec env, instance, module, RAM copy). Idempotent.
 void dart_app_stop(void);
 
+//! Which module a Flutter app loads. Lets the watchface and counter apps run
+//! different modules from the ONE Dart runtime (they never run concurrently).
+typedef enum {
+  DART_SRC_AUTO = 0,   //!< PFS -> flash-XIP -> resource, by precedence (console default)
+  DART_SRC_PFS,        //!< PFS only (dartpush'd flutter_app.wasm) -- the watchface
+  DART_SRC_FLASH_XIP,  //!< DART_MODULE flash-XIP only (+resource fallback) -- the counter
+} DartModuleSrc;
+
+//! Start the resident Flutter app from the given module source (renders frame 0
+//! via presentFrame). PSRAM must be up first. The warm cache is reused only when
+//! it holds a module from the SAME source. @return true on success.
+bool dart_app_start_flutter(DartModuleSrc src);
+
 //! Load the FLUTTER_COUNTER_WASM resource + start the resident Flutter counter app
 //! (renders frame 0 via the presentFrame native). PSRAM must be up first. @return
 //! true on success. Used by the `dart flutter` console command and the Counter app.

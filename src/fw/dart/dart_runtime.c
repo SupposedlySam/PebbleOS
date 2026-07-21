@@ -914,18 +914,28 @@ static uint8_t *prv_load_pfs_module(uint32_t *size_out) {
   return buf;
 }
 
-static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
+static uint8_t *prv_load_flutter_module(uint32_t *size_out, DartModuleSrc src) {
   *size_out = 0;
   if (!dart_runtime_init()) {
     strncpy(s_module_fail, "runtime init", sizeof(s_module_fail) - 1);
     return NULL;
   }
-  uint8_t *pushed = prv_load_pfs_module(size_out);
-  if (pushed) {
-    strncpy(s_module_src, "pfs", sizeof(s_module_src) - 1);
-    s_module_bytes = *size_out;
-    return pushed;
+  // PFS (dartpush'd flutter_app.wasm) -- the watchface's module, and the AUTO
+  // first choice. FLASH_XIP callers (the counter) skip it so a stray PFS push
+  // can't shadow the flash-XIP module.
+  if (src == DART_SRC_AUTO || src == DART_SRC_PFS) {
+    uint8_t *pushed = prv_load_pfs_module(size_out);
+    if (pushed) {
+      strncpy(s_module_src, "pfs", sizeof(s_module_src) - 1);
+      s_module_bytes = *size_out;
+      return pushed;
+    }
+    if (src == DART_SRC_PFS) {
+      strncpy(s_module_fail, "no PFS module (dartpush the watchface)", sizeof(s_module_fail) - 1);
+      return NULL;
+    }
   }
+  // AUTO (no PFS) or FLASH_XIP: the DART_MODULE flash-XIP module, then resource.
   /* XIP-from-flash: a large .aot materialized into the DART_MODULE flash region
      (via `dart flashchunk` + `dart flashfin`) executes IN-PLACE from flash -- its
      native text (~11.7MB for the stock Material counter) is too big to sit in the
@@ -987,22 +997,35 @@ static uint8_t *prv_load_flutter_module(uint32_t *size_out) {
 //! rendering frame 0. PSRAM must already be up (sf32lb52_psram_bringup) so
 //! dart_runtime_init takes the PSRAM pool. Shared by the console command and the
 //! Counter system app. @return true if it started + pumped the first frame.
-bool dart_app_start_flutter_counter(void) {
-  if (prv_app_has_reusable_cache()) {
-    /* Warm cache (non-XIP only): reuse the parsed module; skips the resource
-       read AND WAMR load/validate. Benign check-then-act gap: if a concurrent
-       failure unloads the cache before dart_app_start re-locks, it fails
-       cleanly with "no cached module" (guarded inside the lock). A flash-XIP
+//! True if the warm cache holds a module from `src`. `s_module_src` records what
+//! was last loaded (and the cache, if any, is that module). Prevents a cached
+//! watchface (PFS) from being served to a counter (flash-XIP) launch or vice versa.
+static bool prv_cached_src_matches(DartModuleSrc src) {
+  if (src == DART_SRC_AUTO) return true; /* AUTO reuses whatever non-XIP module is cached */
+  if (src == DART_SRC_PFS) return strncmp(s_module_src, "pfs", sizeof(s_module_src)) == 0;
+  return false; /* FLASH_XIP never reuses (its module is flash, not cached) */
+}
+
+bool dart_app_start_flutter(DartModuleSrc src) {
+  if (prv_app_has_reusable_cache() && prv_cached_src_matches(src)) {
+    /* Warm cache (non-XIP only, same source): reuse the parsed module; skips the
+       resource read AND WAMR load/validate. Benign check-then-act gap: if a
+       concurrent failure unloads the cache before dart_app_start re-locks, it
+       fails cleanly with "no cached module" (guarded inside the lock). A flash-XIP
        module is deliberately NOT reused (it reloads in ~1ms and a kept AOTModule
        is the cross-exit corruption surface) -- fall through to a fresh load. */
     return dart_app_start(NULL, 0);
   }
   uint32_t size = 0;
-  uint8_t *mod = prv_load_flutter_module(&size);
+  uint8_t *mod = prv_load_flutter_module(&size, src);
   if (!mod) {
     return false;
   }
   return dart_app_start(mod, size); /* takes ownership of mod */
+}
+
+bool dart_app_start_flutter_counter(void) {
+  return dart_app_start_flutter(DART_SRC_AUTO);
 }
 
 static void prv_launch_counter_cb(void *unused); /* defined below; used by dart flutter */
@@ -1106,7 +1129,7 @@ static void prv_precache_cb(void *unused) {
     return;
   }
   uint32_t size = 0;
-  uint8_t *buf = prv_load_flutter_module(&size);
+  uint8_t *buf = prv_load_flutter_module(&size, DART_SRC_AUTO);
   if (!buf) {
     PBL_LOG_ALWAYS("dart precache: module load failed (%s)", s_module_fail);
     return;

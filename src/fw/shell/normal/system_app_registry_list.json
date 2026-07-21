@@ -750,6 +750,12 @@
       "enum": "FLUTTER_COUNTER",
       "md_fn": "flutter_counter_get_app_info",
       "ifdefs": ["CONFIG_DART_RUNTIME"]
+    },
+    {
+      "id": -202,
+      "enum": "FLUTTER_WATCHFACE",
+      "md_fn": "flutter_watchface_get_app_info",
+      "ifdefs": ["CONFIG_DART_RUNTIME"]
     }
   ],
   "resource_apps": [

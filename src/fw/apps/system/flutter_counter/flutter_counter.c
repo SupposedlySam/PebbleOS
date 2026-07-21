@@ -63,6 +63,10 @@ static void prv_root_update(Layer *layer, GContext *ctx) {
 //! render per press.
 #define COUNTER_FRAME_MS 33
 static AppTimer *s_frame_timer;
+// Which module THIS launch loads: the counter app runs the DART_MODULE flash-XIP
+// module, the watchface app runs the dartpush'd PFS module. Set by the app's
+// main_func before the event loop (only one Flutter app runs at a time).
+static DartModuleSrc s_src = DART_SRC_FLASH_XIP;
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
 // Firmware-resident (survives the app-task teardown): the delayed PSRAM
 // power-down timer. See prv_deinit / prv_start / PSRAM_IDLE_POWERDOWN_MS.
@@ -149,9 +153,9 @@ static void prv_start(void *ctx) {
     }
   }
 #endif
-  bool dart_ok = dart_app_start_flutter_counter();
+  bool dart_ok = dart_app_start_flutter(s_src);
   if (!dart_ok) {
-    prv_fail(data, "dart_app_start_flutter_counter failed");
+    prv_fail(data, "dart_app_start_flutter failed");
     return;
   }
   touch_service_subscribe(prv_touch, NULL);
@@ -244,11 +248,15 @@ static void prv_deinit(void) {
   task_free(data);
 }
 
-static void s_main(void) {
+// Same lifecycle for both variants; they differ only in which module they load.
+static void prv_run(DartModuleSrc src) {
+  s_src = src;
   prv_init();
   app_event_loop();
   prv_deinit();
 }
+static void s_main_counter(void) { prv_run(DART_SRC_FLASH_XIP); }
+static void s_main_watchface(void) { prv_run(DART_SRC_PFS); }
 
 const PebbleProcessMd *flutter_counter_get_app_info(void) {
   static const PebbleProcessMdSystem s_app_md = {
@@ -256,11 +264,28 @@ const PebbleProcessMd *flutter_counter_get_app_info(void) {
       // UUID: da770002-0000-4000-8000-000000000002
       .uuid = { 0xda, 0x77, 0x00, 0x02, 0x00, 0x00, 0x40, 0x00,
                 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 },
-      .main_func = s_main,
+      .main_func = s_main_counter,
       .process_type = ProcessTypeApp,
       .visibility = ProcessVisibilityShown,
     },
     .name = "Counter",
   };
   return (const PebbleProcessMd *) &s_app_md;
+}
+
+// The Flutter WATCHFACE: same app, ProcessTypeWatchface, loads the PFS module.
+// Registered as a system app (id -202) and set as the default face at boot.
+const PebbleProcessMd *flutter_watchface_get_app_info(void) {
+  static const PebbleProcessMdSystem s_wf_md = {
+    .common = {
+      // UUID: da770003-0000-4000-8000-000000000003 (distinct from the counter)
+      .uuid = { 0xda, 0x77, 0x00, 0x03, 0x00, 0x00, 0x40, 0x00,
+                0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 },
+      .main_func = s_main_watchface,
+      .process_type = ProcessTypeWatchface,
+      .visibility = ProcessVisibilityShown,
+    },
+    .name = "Flutter Watchface",
+  };
+  return (const PebbleProcessMd *) &s_wf_md;
 }
