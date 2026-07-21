@@ -14,6 +14,8 @@
 #include "applib/graphics/gcolor_definitions.h"
 #include "applib/graphics/gtypes.h"
 #include "pbl/services/compositor/compositor.h"
+#include "drivers/rtc.h"
+#include "util/time/time.h"
 
 #include "wasm_export.h"
 #include "gc_export.h"
@@ -419,6 +421,16 @@ static int64_t prv_monotonic_clock_ticks(wasm_exec_env_t env) {
      replay its full 60fps frame count regardless of real frame cost -- at
      ~13s/frame that turned one FAB tap into ~44 invisible renders (~10min). */
   return (int64_t)bh_get_tick_ms() * 1000;
+}
+static int64_t prv_current_time(wasm_exec_env_t env) {
+  /* LOCAL wall-clock micros (the tz-offset native returns 0), so DateTime.now()
+     shows local time on the watchface. The phone sets the RTC (UTC) + timezone;
+     time_utc_to_local applies the offset. */
+  return (int64_t)time_utc_to_local(rtc_get_time()) * 1000000LL;
+}
+static int32_t prv_timezone_offset(wasm_exec_env_t env, int64_t secs) {
+  (void)secs;
+  return 0; /* prv_current_time already returns local time */
 }
 static int32_t prv_string_compare(wasm_exec_env_t env, wasm_externref_obj_t a, wasm_externref_obj_t b) {
   HStr *sa = prv_unwrap(a), *sb = prv_unwrap(b);
@@ -1311,6 +1323,8 @@ static NativeSymbol s_dart_natives[] = {
     {"reportTaskEvent", prv_report_task_event, "(iiirr)i"},
     {"monotonicClockFrequency", prv_monotonic_clock_frequency, "()i"},
     {"monotonicClockTicks", prv_monotonic_clock_ticks, "()I"},
+    {"currentTime", prv_current_time, "()I"},
+    {"timeZoneOffsetInSecondsForClampedSeconds", prv_timezone_offset, "(I)i"},
     {"stringCompare", prv_string_compare, "(rr)i"},
     {"stringIndexOfString", prv_string_index_of_string, "(rri)i"},
     {"stringToLowerCase", prv_string_to_lower_case, "(r)r"},
