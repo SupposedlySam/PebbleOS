@@ -144,6 +144,15 @@ __attribute__((weak)) bool dart_runtime_pool(void **buf, uint32_t *size) {
 }
 
 bool dart_runtime_init(void) {
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+  // Any runtime (re)init -- app OR console -- means the PSRAM pool is about to be
+  // used, so supersede a pending idle power-down via the latch. Without this, a
+  // console `dart` command during the Counter's post-exit idle window re-inits the
+  // pool, then the idle timer powers PSRAM down under the live runtime -> a store
+  // into the disabled window faults (silent reset). Putting it here protects the
+  // pool for EVERY caller, not just the app lifecycle (prv_start still cancels too).
+  sf32lb52_psram_cancel_powerdown();
+#endif
   if (s_initialized) {
     return true;
   }

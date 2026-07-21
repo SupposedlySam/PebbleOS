@@ -21,6 +21,7 @@
 #include "kernel/pbl_malloc.h"
 #include "kernel/util/sleep.h"
 #include "pbl/services/system_task.h"
+#include "pbl/services/new_timer/new_timer.h"
 #include "process_management/pebble_process_md.h"
 #include "process_state/app_state/app_state.h"
 
@@ -62,6 +63,11 @@ static void prv_root_update(Layer *layer, GContext *ctx) {
 //! render per press.
 #define COUNTER_FRAME_MS 33
 static AppTimer *s_frame_timer;
+#if defined(CONFIG_BOARD_FAMILY_OBELIX)
+// Firmware-resident (survives the app-task teardown): the delayed PSRAM
+// power-down timer. See prv_deinit / prv_start / PSRAM_IDLE_POWERDOWN_MS.
+static TimerID s_psram_idle_timer;
+#endif
 
 static void prv_frame_tick(void *context) {
   dart_app_pump(); /* renders iff a frame was scheduled; ~0 when idle */
@@ -121,9 +127,13 @@ static void prv_fail(CounterData *data, const char *why) {
 static void prv_start(void *ctx) {
   CounterData *data = app_state_get_user_data();
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  // Supersede any power-down the previous exit queued (atomic vs. the KernelBG
-  // callback), BEFORE trusting is_ready() -- otherwise a fast reopen could skip
-  // bring-up on stale is_ready and then have PSRAM cut out from under it.
+  // Supersede any power-down the previous exit scheduled, BEFORE trusting
+  // is_ready(). Stop the idle timer (so it won't fire), AND cancel the arm (belt +
+  // suspenders in case the timer just fired and queued the KernelBG power-down --
+  // cancel makes it a no-op, so PSRAM is never cut out from under this launch).
+  if (s_psram_idle_timer != TIMER_INVALID_ID) {
+    new_timer_stop(s_psram_idle_timer);
+  }
   sf32lb52_psram_cancel_powerdown();
   if (!sf32lb52_psram_is_ready()) {
     if (!system_task_add_callback(prv_psram_bringup_cb, NULL)) {
@@ -169,16 +179,28 @@ static void prv_init(void) {
 }
 
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
+// Keep PSRAM up for this long after the app exits, so a quick reopen (the common
+// glance-away-glance-back pattern) skips the ~3s bring-up + module parse. After
+// this it powers down for battery. new_timer is firmware-resident so it survives
+// the app-task teardown; s_psram_idle_timer persists across launches.
+#define PSRAM_IDLE_POWERDOWN_MS (120 * 1000)
+
 //! Runs on KernelBG (privileged, like bring-up): powers the whole PSRAM stack
 //! down (die DPD + 288MHz PLL + controller + pad park) so an idle watch isn't
 //! paying its always-on cost -- it halved multi-day battery life. Safe ONLY
 //! after the Dart runtime is fully torn down (its pool lives in PSRAM); the
-//! next launch pays the full bring-up + module parse again (~8s), the right
-//! trade on a wrist.
+//! next launch pays the full bring-up + module parse again, the right trade on
+//! a wrist once the watch has actually been idle.
 static void prv_psram_powerdown_cb(void *unused) {
   // if_armed: a no-op when the next app enter already cancelled it, so PSRAM is
   // never cut out from under a fast reopen (atomic vs. cancel_powerdown).
   sf32lb52_psram_powerdown_if_armed();
+}
+
+//! Fires PSRAM_IDLE_POWERDOWN_MS after exit if the app hasn't reopened. Runs on
+//! the new_timer task; dispatch the privileged power-down to KernelBG.
+static void prv_psram_idle_timeout_cb(void *unused) {
+  system_task_add_callback(prv_psram_powerdown_cb, NULL);
 }
 #endif
 
@@ -198,19 +220,24 @@ static void prv_deinit(void) {
   // clears that state; this is the console `psram off` order (teardown FIRST).
   dart_runtime_teardown();
 #if defined(CONFIG_BOARD_FAMILY_OBELIX)
-  // Power PSRAM down for battery whenever the app exits (incl. the Back button).
-  // ARM it, then run the actual power-down on KernelBG (privileged, like bring-up).
-  // We deliberately do NOT wait: prv_deinit runs inside the ~3s graceful-close
-  // deadline, and blocking here risks a force-kill/croak. The race a wait would
-  // guard is instead closed by making the power-down cancelable -- the next enter
-  // calls sf32lb52_psram_cancel_powerdown() so a fast reopen supersedes a pending
-  // power-down atomically (see prv_start). Bring-up on the next enter is prv_start's.
+  // Power PSRAM down for battery when the app exits -- but DELAYED by
+  // PSRAM_IDLE_POWERDOWN_MS so a quick reopen skips the ~3s bring-up (kept warm).
+  // ARM it now; the idle timer (or a fast-reopen's cancel) decides the outcome.
+  // The actual power-down runs on KernelBG (privileged) and is cancelable, so a
+  // reopen that races the timer still supersedes it atomically (see prv_start).
+  // We deliberately don't block here (prv_deinit is inside the ~3s graceful-close
+  // deadline). If the timer can't be armed, power down now rather than leak PSRAM
+  // up forever.
   sf32lb52_psram_arm_powerdown();
-  if (!system_task_add_callback(prv_psram_powerdown_cb, NULL)) {
-    // KernelBG queue full: PSRAM stays up one extra cycle (battery only). It
-    // self-heals -- the next enter cancels the stale arm, or the next exit
-    // re-queues and powers down then. No crash. Log so the leak is visible.
-    APP_LOG(APP_LOG_LEVEL_WARNING, "counter: PSRAM power-down not queued (KernelBG full)");
+  if (s_psram_idle_timer == TIMER_INVALID_ID) {
+    s_psram_idle_timer = new_timer_create();
+  }
+  if (s_psram_idle_timer == TIMER_INVALID_ID ||
+      !new_timer_start(s_psram_idle_timer, PSRAM_IDLE_POWERDOWN_MS,
+                       prv_psram_idle_timeout_cb, NULL, 0)) {
+    if (!system_task_add_callback(prv_psram_powerdown_cb, NULL)) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "counter: PSRAM power-down not queued (KernelBG full)");
+    }
   }
 #endif
   window_destroy(data->window);
